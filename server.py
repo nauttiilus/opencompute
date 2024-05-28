@@ -5,6 +5,7 @@ import wandb
 import os
 from dotenv import load_dotenv
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI()
 
@@ -23,6 +24,9 @@ metagraph = bt.metagraph(netuid=27)
 hardware_specs_cache: Dict[int, Dict[str, Any]] = {}
 allocated_hotkeys_cache: List[str] = []
 
+# Create a ThreadPoolExecutor
+executor = ThreadPoolExecutor(max_workers=4)
+
 # Function to fetch hardware specs from wandb
 def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
     db_specs_dict: Dict[int, Dict[str, Any]] = {}
@@ -34,7 +38,7 @@ def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
             hotkey = run_config.get('hotkey')
             details = run_config.get('specs')
             role = run_config.get('role')
-            if hotkey in hotkeys and details and role == 'miner':
+            if hotkey in hotkeys and isinstance(details, dict) and role == 'miner':
                 index = hotkeys.index(hotkey)
                 db_specs_dict[index] = {"hotkey": hotkey, "details": details}
     except Exception as e:
@@ -70,16 +74,20 @@ async def sync_data_periodically():
     while True:
         try:
             metagraph.sync()
+
+            # Run the blocking W&B API calls in a separate thread
+            loop = asyncio.get_event_loop()
             wandb.login(key=api_key)
             api = wandb.Api()
+
             hotkeys = metagraph.hotkeys
 
-            hardware_specs_cache = fetch_hardware_specs(api, hotkeys)
-            allocated_hotkeys_cache = get_allocated_hotkeys(api)
+            hardware_specs_cache = await loop.run_in_executor(executor, fetch_hardware_specs, api, hotkeys)
+            allocated_hotkeys_cache = await loop.run_in_executor(executor, get_allocated_hotkeys, api)
         except Exception as e:
             print(f"An error occurred during periodic sync: {e}")
         
-        await asyncio.sleep(900)  # Sleep for 15 minutes
+        await asyncio.sleep(600)  # Sleep for 10 minutes
 
 @app.on_event("startup")
 async def startup_event():
@@ -101,5 +109,3 @@ async def get_allocated_keys() -> Dict[str, List[str]]:
 # To run the server:
 # uvicorn server:app --reload --host 0.0.0.0 --port 8000
 # pm2 start uvicorn --interpreter python3 --name opencompute_server -- --host 0.0.0.0 --port 8000 server:app
-
-
