@@ -53,6 +53,15 @@ def display_hardware_specs(specs_details, allocated_keys, penalized_keys):
 
                 row = [str(index), hotkey[:6] + ('...'), gpu_name, gpu_capacity, str(gpu_count), str(cpu_count), ram, hard_disk, status, conform]
 
+                # Update summaries for GPU instances and total counts
+                if isinstance(gpu_name, str) and isinstance(gpu_count, int):
+                    row = [str(index), hotkey[:6] + ('...'), gpu_name, gpu_capacity, str(gpu_count), str(cpu_count), ram, hard_disk, "Pending"]
+                    gpu_key = (gpu_name, gpu_count)
+                    gpu_instances[gpu_key] = gpu_instances.get(gpu_key, 0) + 1
+                    total_gpu_counts[gpu_name] = total_gpu_counts.get(gpu_name, 0) + gpu_count
+                else:
+                    row = [str(index), hotkey[:6] + ('...'), "No GPU data"] + ["N/A"] * 7
+
             except (KeyError, IndexError, TypeError):
                 row = [str(index), hotkey[:6] + ('...'), "Invalid details"] + ["N/A"] * 7
         else:
