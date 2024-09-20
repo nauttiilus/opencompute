@@ -23,7 +23,7 @@ def get_data_from_server(endpoint):
 
 def display_hardware_specs(specs_details, allocated_keys, penalized_keys):
     # Compute all necessary data before setting up the tabs
-    column_headers = ["UID", "Hotkey", "GPU Name", "GPU Capacity (GiB)", "GPU Count", "CPU Count", "RAM (GiB)", "Disk Space (GiB)", "Status", "Conform"]
+    column_headers = ["UID", "Hotkey", "GPU Name", "GPU Capacity (GiB)", "GPU Count", "CPU Count", "RAM (GiB)", "Disk Space (GiB)", "Status", "Conformity"]
     table_data = []
 
     gpu_instances = {}
@@ -55,7 +55,7 @@ def display_hardware_specs(specs_details, allocated_keys, penalized_keys):
 
                 # Update summaries for GPU instances and total counts
                 if isinstance(gpu_name, str) and isinstance(gpu_count, int):
-                    row = [str(index), hotkey[:6] + ('...'), gpu_name, gpu_capacity, str(gpu_count), str(cpu_count), ram, hard_disk, "Pending"]
+                    row = [str(index), hotkey[:6] + ('...'), gpu_name, gpu_capacity, str(gpu_count), str(cpu_count), ram, hard_disk, status, conform]
                     gpu_key = (gpu_name, gpu_count)
                     gpu_instances[gpu_key] = gpu_instances.get(gpu_key, 0) + 1
                     total_gpu_counts[gpu_name] = total_gpu_counts.get(gpu_name, 0) + gpu_count

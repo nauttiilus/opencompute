@@ -23,6 +23,7 @@ metagraph = bt.metagraph(netuid=27)
 # Cache to store fetched data
 hardware_specs_cache: Dict[int, Dict[str, Any]] = {}
 allocated_hotkeys_cache: List[str] = []
+penalized_hotkeys_cache: List[str] = []
 
 # Create a ThreadPoolExecutor
 executor = ThreadPoolExecutor(max_workers=4)
@@ -68,7 +69,35 @@ def get_allocated_hotkeys(api) -> List[str]:
 
     return allocated_keys_list
 
-# Function to get penalized hotkeys from all validators
+# Function to get penalized hotkeys from a specific validator run
+def get_penalized_hotkeys(api, run_id: str) -> List[str]:
+    api.flush()
+    
+    # Fetch the specific run by its ID
+    run = api.run(run_id)
+
+    if not run:
+        print(f"No run info found for ID {run_id}.")
+        return []
+
+    penalized_keys_list: List[str] = []
+
+    try:
+        run_config = run.config
+        # Updated to get the checklist of penalized hotkeys
+        penalized_hotkeys_checklist = run_config.get('penalized_hotkeys_checklist', [])
+        if penalized_hotkeys_checklist:
+            # Loop through the checklist and extract the 'hotkey' field
+            for entry in penalized_hotkeys_checklist:
+                hotkey = entry.get('hotkey')
+                if hotkey:
+                    penalized_keys_list.append(hotkey)
+    except Exception as e:
+        print(f"Run ID: {run.id}, Name: {run.name}, Error: {e}")
+
+    return penalized_keys_list
+
+# Function to get penalized hotkeys
 def get_penalized_hotkeys(api) -> List[str]:
     api.flush()
     runs = api.runs(f"{PUBLIC_WANDB_ENTITY}/{PUBLIC_WANDB_NAME}")
@@ -83,9 +112,14 @@ def get_penalized_hotkeys(api) -> List[str]:
     for run in validator_runs:
         try:
             run_config = run.config
-            allocated_keys = run_config.get('penalized_hotkeys')
-            if allocated_keys:
-                penalized_keys_list.extend(allocated_keys)
+            # Updated to get the checklist of penalized hotkeys
+            penalized_hotkeys_checklist = run_config.get('penalized_hotkeys_checklist', [])
+            if penalized_hotkeys_checklist:
+                # Loop through the checklist and extract the 'hotkey' field
+                for entry in penalized_hotkeys_checklist:
+                    hotkey = entry.get('hotkey')
+                    if hotkey:
+                        penalized_keys_list.append(hotkey)
         except Exception as e:
             print(f"Run ID: {run.id}, Name: {run.name}, Error: {e}")
 
@@ -108,6 +142,9 @@ async def sync_data_periodically():
             hardware_specs_cache = await loop.run_in_executor(executor, fetch_hardware_specs, api, hotkeys)
             allocated_hotkeys_cache = await loop.run_in_executor(executor, get_allocated_hotkeys, api)
             penalized_hotkeys_cache = await loop.run_in_executor(executor, get_penalized_hotkeys, api)
+            penalized_hotkeys_cache = await loop.run_in_executor(executor, get_penalized_hotkeys, api, "neuralinternet/opencompute/dvgtj3dr")
+ 
+
         except Exception as e:
             print(f"An error occurred during periodic sync: {e}")
         
@@ -132,7 +169,7 @@ async def get_allocated_keys() -> Dict[str, List[str]]:
 
 @app.get("/penalized_keys")
 async def get_penalized_keys() -> Dict[str, List[str]]:
-    return {"allocated_keys": allocated_hotkeys_cache}
+    return {"penalized_keys": penalized_hotkeys_cache}
 
 # To run the server:
 # uvicorn server:app --reload --host 0.0.0.0 --port 8000
