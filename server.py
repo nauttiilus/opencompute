@@ -70,7 +70,7 @@ def get_allocated_hotkeys(api) -> List[str]:
     return allocated_keys_list
 
 # Function to get penalized hotkeys from a specific validator run
-def get_penalized_hotkeys(api, run_id: str) -> List[str]:
+def get_penalized_hotkeys_id(api, run_id: str) -> List[str]:
     api.flush()
     
     # Fetch the specific run by its ID
@@ -141,8 +141,8 @@ async def sync_data_periodically():
 
             hardware_specs_cache = await loop.run_in_executor(executor, fetch_hardware_specs, api, hotkeys)
             allocated_hotkeys_cache = await loop.run_in_executor(executor, get_allocated_hotkeys, api)
-            penalized_hotkeys_cache = await loop.run_in_executor(executor, get_penalized_hotkeys, api)
-            penalized_hotkeys_cache = await loop.run_in_executor(executor, get_penalized_hotkeys, api, "neuralinternet/opencompute/dvgtj3dr")
+            #penalized_hotkeys_cache = await loop.run_in_executor(executor, get_penalized_hotkeys, api)
+            penalized_hotkeys_cache = await loop.run_in_executor(executor, get_penalized_hotkeys_id, api, "neuralinternet/opencompute/dvgtj3dr")
  
 
         except Exception as e:
@@ -172,5 +172,5 @@ async def get_penalized_keys() -> Dict[str, List[str]]:
     return {"penalized_keys": penalized_hotkeys_cache}
 
 # To run the server:
-# uvicorn server:app --reload --host 0.0.0.0 --port 8000
+# uvicorn server:app --reload --host 0.0.0.0 --port 8316
 # pm2 start uvicorn --interpreter python3 --name opencompute_server -- --host 0.0.0.0 --port 8000 server:app
