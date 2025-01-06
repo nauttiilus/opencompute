@@ -10,8 +10,8 @@ import time
 st.set_page_config(page_title="Opencompute", layout="wide", page_icon="icon.ico")
 
 # Server details
-SERVER_IP = "65.108.32.160"
-SERVER_PORT = "8000"
+SERVER_IP = "213.173.107.93"
+SERVER_PORT = "18272"
 SERVER_URL = f"http://{SERVER_IP}:{SERVER_PORT}"
 
 def get_data_from_server(endpoint):
