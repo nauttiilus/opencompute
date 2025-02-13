@@ -87,7 +87,7 @@ def display_hardware_specs(specs_details, allocated_keys, penalized_keys):
             st.table(pd.DataFrame(summary_data, columns=["GPU Name", "Total GPU Count"]))
 
 # Streamlit App Layout
-st.title('Compute Subnet - Hardware Specifications')
+st.title('NI Compute (SN27) - Hardware Specifications')
 
 # Fetching data from external server
 with st.spinner('Fetching data from server...'):
