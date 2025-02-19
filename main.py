@@ -1,8 +1,7 @@
-# Streamlit main script
 import streamlit as st
 import os
 from dotenv import load_dotenv
-import pandas as pd 
+import pandas as pd
 import requests
 import time
 
@@ -10,8 +9,8 @@ import time
 st.set_page_config(page_title="Opencompute", layout="wide", page_icon="icon.ico")
 
 # Server details
-SERVER_IP = "213.173.107.93"
-SERVER_PORT = "18272"
+SERVER_IP = "94.101.98.71"
+SERVER_PORT = "8000"
 SERVER_URL = f"http://{SERVER_IP}:{SERVER_PORT}"
 
 def get_data_from_server(endpoint):
@@ -22,54 +21,107 @@ def get_data_from_server(endpoint):
         return {}
 
 def display_hardware_specs(specs_details, allocated_keys, penalized_keys):
-    # Compute all necessary data before setting up the tabs
-    column_headers = ["UID", "Hotkey", "GPU Name", "GPU Capacity (GiB)", "GPU Count", "CPU Count", "RAM (GiB)", "Disk Space (GiB)", "Status", "Conformity"]
-    table_data = []
+    column_headers = [
+        "UID", "Hotkey", 
+        "GPU Name", 
+        "GPU Capacity (GiB)", 
+        "GPU Count", 
+        "CPU Count", 
+        "RAM (GiB)", 
+        "Disk Space (GiB)", 
+        "Status", 
+        "Conformity"
+    ]
 
+    table_data = []
     gpu_instances = {}
     total_gpu_counts = {}
 
     for index in sorted(specs_details.keys()):
-        hotkey = specs_details[index]['hotkey']
-        details = specs_details[index]['details']
-        if details:
-            try:
-                gpu_miner = details['gpu']
-                gpu_capacity = "{:.2f}".format(gpu_miner['capacity'] / 1024)  # Capacity is in MiB
-                gpu_name = str(gpu_miner['details'][0]['name']).lower()
-                gpu_count = gpu_miner['count']
+        item = specs_details[index]  # e.g. { "hotkey":..., "details":..., "stats": ... }
+        if not item:
+            # If item itself is None or empty, skip or handle
+            row = [str(index), "No item", "N/A"] + ["N/A"] * 7
+            table_data.append(row)
+            continue
 
-                cpu_miner = details['cpu']
-                cpu_count = cpu_miner['count']
+        hotkey = item.get('hotkey', 'unknown')
+        details = item.get('details', {})
+        
+        # Handle stats = null -> None
+        stats_data = item.get('stats') or {}
+        # Now stats_data is guaranteed a dict
+        gpu_specs = stats_data.get('gpu_specs')  # might be None
 
-                ram_miner = details['ram']
-                ram = "{:.2f}".format(ram_miner['available'] / 1024.0 ** 3)  # Convert bytes to GiB
-
-                hard_disk_miner = details['hard_disk']
-                hard_disk = "{:.2f}".format(hard_disk_miner['free'] / 1024.0 ** 3)  # Convert bytes to GiB
-
-                status = "Res." if hotkey in allocated_keys else "Avail."
-                conform = "No" if hotkey in penalized_keys else "Yes"
-
-                row = [str(index), hotkey[:6] + ('...'), gpu_name, gpu_capacity, str(gpu_count), str(cpu_count), ram, hard_disk, status, conform]
-
-                # Update summaries for GPU instances and total counts
-                if isinstance(gpu_name, str) and isinstance(gpu_count, int):
-                    row = [str(index), hotkey[:6] + ('...'), gpu_name, gpu_capacity, str(gpu_count), str(cpu_count), ram, hard_disk, status, conform]
-                    gpu_key = (gpu_name, gpu_count)
-                    gpu_instances[gpu_key] = gpu_instances.get(gpu_key, 0) + 1
-                    total_gpu_counts[gpu_name] = total_gpu_counts.get(gpu_name, 0) + gpu_count
-                else:
-                    row = [str(index), hotkey[:6] + ('...'), "No GPU data"] + ["N/A"] * 7
-
-            except (KeyError, IndexError, TypeError):
-                row = [str(index), hotkey[:6] + ('...'), "Invalid details"] + ["N/A"] * 7
+        # GPU Name & Count from stats
+        if gpu_specs is not None:
+            gpu_name = gpu_specs.get('gpu_name', "N/A")
+            gpu_count = gpu_specs.get('num_gpus', 0)
         else:
-            row = [str(index), hotkey[:6] + ('...'), "No details available"] + ["N/A"] * 7
+            gpu_name = "No GPU Stats"
+            gpu_count = 0
 
+        # GPU capacity from the miner’s `details`
+        try:
+            gpu_miner = details.get('gpu', {})
+            capacity_mib = gpu_miner.get('capacity', 0)
+            gpu_capacity = "{:.2f}".format(capacity_mib / 1024)
+        except (KeyError, TypeError):
+            gpu_capacity = "N/A"
+
+        # CPU
+        try:
+            cpu_miner = details.get('cpu', {})
+            cpu_count = cpu_miner.get('count', 0)
+        except:
+            cpu_count = "N/A"
+
+        # RAM
+        try:
+            ram_miner = details.get('ram', {})
+            ram_bytes = ram_miner.get('available', 0)
+            ram_gib = "{:.2f}".format(ram_bytes / (1024.0**3))
+        except:
+            ram_gib = "N/A"
+
+        # Disk
+        try:
+            hard_disk_miner = details.get('hard_disk', {})
+            disk_bytes = hard_disk_miner.get('free', 0)
+            disk_gib = "{:.2f}".format(disk_bytes / (1024.0**3))
+        except:
+            disk_gib = "N/A"
+
+        # Allocated & Penalized
+        status = "Res." if hotkey in allocated_keys else "Avail."
+        # If penalized OR stats is missing GPU specs, mark as "No"
+        if hotkey in penalized_keys or gpu_specs is None:
+            conform = "No"
+        else:
+            conform = "Yes"
+
+        # Final row
+        row = [
+            str(index),
+            hotkey[:6] + "...",
+            gpu_name,
+            gpu_capacity,
+            str(gpu_count),
+            str(cpu_count),
+            ram_gib,
+            disk_gib,
+            status,
+            conform
+        ]
         table_data.append(row)
 
-    # Display the tabs
+        # Summaries for GPU
+        if gpu_specs is not None and gpu_name != "N/A" and gpu_name != "No GPU Stats" and gpu_count > 0:
+            gpu_key = (gpu_name, gpu_count)
+            gpu_instances[gpu_key] = gpu_instances.get(gpu_key, 0) + 1
+            total_gpu_counts[gpu_name] = total_gpu_counts.get(gpu_name, 0) + gpu_count
+
+    # Tabs
     tab1, tab2, tab3 = st.tabs(["Hardware Overview", "Instances Summary", "Total GPU Counts"])
 
     with tab1:
@@ -77,17 +129,29 @@ def display_hardware_specs(specs_details, allocated_keys, penalized_keys):
         st.table(df)
 
     with tab2:
-        summary_data = [[gpu_name, str(gpu_count), str(instances)] for (gpu_name, gpu_count), instances in gpu_instances.items()]
+        summary_data = [
+            [gpu_key[0], str(gpu_key[1]), str(instances)]
+            for gpu_key, instances in gpu_instances.items()
+        ]
         if summary_data:
             st.table(pd.DataFrame(summary_data, columns=["GPU Name", "GPU Count", "Instances Count"]))
+        else:
+            st.write("No GPU instance data to summarize.")
 
     with tab3:
         summary_data = [[name, str(count)] for name, count in total_gpu_counts.items()]
         if summary_data:
             st.table(pd.DataFrame(summary_data, columns=["GPU Name", "Total GPU Count"]))
+        else:
+            st.write("No total GPU count data to display.")
 
+# ------------------------------
 # Streamlit App Layout
+# ------------------------------
 st.title('NI Compute (SN27) - Hardware Specifications')
+
+# Load environment vars (optional)
+load_dotenv()
 
 # Fetching data from external server
 with st.spinner('Fetching data from server...'):
@@ -105,12 +169,14 @@ with st.spinner('Fetching data from server...'):
         penalized_keys = penalized_keys_response.get("penalized_keys", [])
 
     except:
-        print("Error: ConnectionError")
+        st.error("Error fetching data from server.")
+        specs_details = {}
+        allocated_keys = []
+        penalized_keys = []
 
 # Display fetched hardware specs
 try:
     display_hardware_specs(specs_details, allocated_keys, penalized_keys)
-except:
-    st.write("Unable to connect to the server. Please try again later.")
-    print("Error: ConnectionError occurred while attempting to connect to the server.")
-
+except Exception as e:
+    st.write("Unable to connect to the server or parse data. Please try again later.")
+    st.write(f"Exception: {e}")
