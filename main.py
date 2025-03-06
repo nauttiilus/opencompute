@@ -9,7 +9,7 @@ import time
 st.set_page_config(page_title="Opencompute", layout="wide", page_icon="icon.ico")
 
 # Server details
-SERVER_IP = "94.101.98.71"
+SERVER_IP = "65.108.33.88"
 SERVER_PORT = "8000"
 SERVER_URL = f"http://{SERVER_IP}:{SERVER_PORT}"
 
@@ -44,12 +44,13 @@ def display_hardware_specs(specs_details, allocated_keys, penalized_keys):
             row = [str(index), "No item", "N/A"] + ["N/A"] * 7
             table_data.append(row)
             continue
+        
+        # Handle stats = null -> None
+        stats_data = item.get('stats') or {}
 
         hotkey = item.get('hotkey', 'unknown')
         details = item.get('details', {})
         
-        # Handle stats = null -> None
-        stats_data = item.get('stats') or {}
         # Now stats_data is guaranteed a dict
         gpu_specs = stats_data.get('gpu_specs')  # might be None
 
