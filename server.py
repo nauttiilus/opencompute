@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 from bittensor.core.metagraph import Metagraph
 from bittensor.core.subtensor import Subtensor
 import argparse
+import json
+import httpx
 
 app = FastAPI()
 
@@ -26,6 +28,9 @@ hardware_specs_cache: Dict[int, Dict[str, Any]] = {}
 allocated_hotkeys_cache: List[str] = []
 penalized_hotkeys_cache: List[str] = []
 hotkeys_cache: List[str] = []
+metagraph_cache: Dict[str, Any] = {}
+subnet_cache: Dict[str, Any] = {}
+price_cache: Dict[str, Any] = {}
 
 # Validator stats
 stats: Dict[int, Any] = {}
@@ -115,7 +120,7 @@ def get_penalized_hotkeys_id(api, run_path: str) -> List[str]:
         run_config = run.config
         penalized_hotkeys_checklist = run_config.get('penalized_hotkeys_checklist', [])
         for entry in penalized_hotkeys_checklist:
-            hotkey = entry.get('hotkey')
+            hotkey = entry #.get('hotkey')
             if hotkey:
                 penalized_keys_list.append(hotkey)
     except Exception as e:
@@ -132,6 +137,45 @@ def get_metagraph():
 
     return metagraph
 
+def get_subnet_alpha_price():
+    subtensor = bt.subtensor(network="finney")
+    
+    # Fetch subnet information directly without metagraph
+    subnet_info = subtensor.subnet(27)
+
+    # Get the current alpha price (τ/α) and emission rate (α/block)
+    alpha_price = subnet_info.price
+    alpha_emission = subnet_info.emission
+
+    return alpha_price, alpha_emission
+
+def get_subnet_alpha_price():
+    subtensor = bt.subtensor(network="finney")
+    
+    # Fetch subnet information directly without metagraph
+    subnet_info = subtensor.subnet(27)
+
+    # Get the current alpha price (τ/α) and emission rate (α/block)
+    alpha_price = float(subnet_info.price)
+    alpha_emission = float(subnet_info.emission)
+
+    return alpha_price, alpha_emission
+
+async def fetch_tao_price():
+    """Fetches the latest TAO price from CoinGecko asynchronously."""
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd"
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                price_cache["tao_price"] = data["bittensor"]["usd"]
+                print(f"✅ Updated TAO/USD Price: ${price_cache['tao_price']}")
+            else:
+                print(f"⚠️ Failed to fetch TAO price: {response.status_code}")
+    except Exception as e:
+        print(f"❌ Error fetching TAO price: {e}")
 
 async def sync_data_periodically():
     """
@@ -141,9 +185,10 @@ async def sync_data_periodically():
      3) Fetches miner specs 
      4) Fetches allocated & penalized hotkeys
     """
-    global hardware_specs_cache, allocated_hotkeys_cache, penalized_hotkeys_cache, stats
     validator_run_path = "neuralinternet/opencompute/8etd9d95"  # Example
     validator_run_path2 = "neuralinternet/opencompute/0djlnjjs"  # Example
+
+    global metagraph_cache, hardware_specs_cache, allocated_hotkeys_cache, penalized_hotkeys_cache, stats, subnet_cache, price_cache
 
     # Create the wandb API object once
     api = wandb.Api()
@@ -158,6 +203,40 @@ async def sync_data_periodically():
             print("[DEBUG] Starting metagraph sync in background task ...")
             metagraph = await loop.run_in_executor(executor, get_metagraph)
             print("[DEBUG] Metagraph is up-to-date.")
+
+            # 2) Store all metagraph details in cache
+            metagraph_cache = {
+                "version": metagraph.version.tolist(),
+                "n": metagraph.n.tolist(),
+                "block": metagraph.block.tolist(),
+                "stake": metagraph.S.tolist(),
+                "total_stake": metagraph.total_stake.tolist(),
+                "ranks": metagraph.R.tolist(),
+                "trust": metagraph.T.tolist(),
+                "consensus": metagraph.C.tolist(),
+                "validator_trust": metagraph.validator_trust.tolist(),
+                "incentive": metagraph.I.tolist(),
+                "emission": metagraph.E.tolist(),
+                "dividends": metagraph.D.tolist(),
+                "active": metagraph.active.tolist(),
+                "last_update": metagraph.last_update.tolist(),
+                "validator_permit": metagraph.validator_permit.tolist(),
+                "weights": metagraph.weights.tolist(),
+                "bonds": metagraph.bonds.tolist(),
+                "uids": metagraph.uids.tolist(),
+                "hotkeys": metagraph.hotkeys,  # Ensure deep copy for thread safety
+                "axons": [axon for axon in metagraph.axons],
+                #"neurons": [neuron.to_dict() for neuron in metagraph.neurons]
+            }
+
+            alpha_price, alpha_emission = get_subnet_alpha_price()
+            print(f"Alpha Price (τ/α): {alpha_price}")
+            print(f"Alpha Emission (α/block): {alpha_emission}")
+
+            subnet_cache = {
+                "alpha_price": alpha_price,
+                "alpha_emission": alpha_emission,
+            }
             
             # 2) Load validator stats (executor again, but for CPU-bound or blocking I/O calls)
             new_stats = await loop.run_in_executor(
@@ -197,11 +276,13 @@ async def sync_data_periodically():
             )
             penalized_hotkeys_cache = penalized
 
+            await fetch_tao_price()
+
         except Exception as e:
             print(f"An error occurred during periodic sync: {e}")
 
         # Sleep 10 minutes between syncs
-        await asyncio.sleep(600)
+        await asyncio.sleep(300)
 
 @app.on_event("startup")
 async def startup_event():
@@ -226,6 +307,26 @@ async def get_allocated_keys() -> Dict[str, List[str]]:
 @app.get("/penalized_keys")
 async def get_penalized_keys() -> Dict[str, List[str]]:
     return {"penalized_keys": penalized_hotkeys_cache}
+
+@app.get("/subnet")
+async def get_subnet_data() -> Dict[str, Any]:
+    return {"subnet": subnet_cache}
+
+@app.get("/metagraph")
+async def get_metagraph_data() -> Dict[str, Any]:
+    """
+    API endpoint to fetch the latest metagraph state.
+    Returns hotkeys, stake, trust, ranks, incentive, emission, consensus, and dividends.
+    """
+    if not metagraph_cache:
+        return {"error": "Metagraph data not available. Try again later."}
+
+    return {"metagraph": metagraph_cache}
+
+@app.get("/price")
+async def get_tao_price() -> Dict[str, Any]:
+    """API Endpoint to get the latest TAO/USD price."""
+    return {"tao_price": price_cache.get("tao_price", "N/A")}
 
 # To run the server:
 # uvicorn server:app --reload --host 0.0.0.0 --port 8316
