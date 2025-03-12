@@ -149,18 +149,6 @@ def get_subnet_alpha_price():
 
     return alpha_price, alpha_emission
 
-def get_subnet_alpha_price():
-    subtensor = bt.subtensor(network="finney")
-    
-    # Fetch subnet information directly without metagraph
-    subnet_info = subtensor.subnet(27)
-
-    # Get the current alpha price (τ/α) and emission rate (α/block)
-    alpha_price = float(subnet_info.price)
-    alpha_emission = float(subnet_info.emission)
-
-    return alpha_price, alpha_emission
-
 async def fetch_tao_price():
     """Fetches the latest TAO price from CoinGecko asynchronously."""
     url = "https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd"

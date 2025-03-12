@@ -675,52 +675,28 @@ def help_links():
     )
 
 def chat():
-    """Chat Interface for Help & Setup (In Development)"""
-    st.title("Chat Support (In Development)")
-    st.write(
-        "This chat will assist with system setup, troubleshooting, and general "
-        "information about Neural Internet. It is currently under development."
+    """Neural Internet Chat Support (Now Powered by ChatGPT)"""
+    st.title("Chat Support")
+    
+    st.markdown("---")
+
+    st.write("The Neural Internet ChatGPT assistant can help answer common questions like:")
+
+    st.markdown(
+        """
+        - <span class="icon">help</span> **What is Neural Internet?**
+        - <span class="icon">computer</span> **How do I mine on NI Compute?**
+        - <span class="icon">warning</span> **Why is my miner not receiving emissions?**
+        - <span class="icon">check_circle</span> **How do I check if my miner is running properly?**
+        """,
+        unsafe_allow_html=True,
     )
 
-    # Apply a single-column layout (half-page width)
-    col1, col2 = st.columns([1, 2])  # Chat in left column, empty right column
-    with col1:
-        st.markdown("---")
-        st.markdown("### Chat")
+    # Button to ChatGPT-powered Neural Internet chat
+    chat_link = "https://chatgpt.com/g/g-67cf2506b6f88191a4400819f6963378-neural-internet"
+    st.link_button("Open Neural Internet Chat", chat_link, type="secondary", icon=":material/chat:")
 
-        # Custom chat history - NI icon for AI responses
-        chat_history = [
-            ("User", "How do I set up my node?"),
-            ("NI AI", "This feature is still in development. Please check the documentation: [Docs](https://docs.neuralinternet.ai/)"),
-            ("User", "Can I get performance stats?"),
-            ("NI AI", "This feature is coming soon! Stay tuned."),
-        ]
-
-        # Custom chat display (removes default yellow/red)
-        for sender, message in chat_history:
-            if sender == "User":
-                st.chat_message("user").write(message)
-            else:
-                st.chat_message("assistant", avatar=logo_path).write(message)  # Uses NI icon
-
-        # Non-functional chat input (disabled for now)
-        st.chat_input("Enter your message here... (Feature in development)", disabled=True)
-
-    # Development notice
-    with col1:
-        st.markdown("---")
-        st.markdown(
-            """
-            **Note:** This chat feature is currently under development.
-            In the future, it will provide real-time assistance for:
-            - Setting up and configuring nodes
-            - System troubleshooting
-            - Information about Neural Internet
-            - General support and FAQs
-
-            For now, please refer to the [Neural Internet Documentation](https://docs.neuralinternet.ai/) for assistance.
-            """
-        )
+    st.markdown("---")
 
 # Organizing Pages into Sections
 network_pages = [
