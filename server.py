@@ -58,31 +58,124 @@ def fetch_validator_stats(api, run_path: str) -> Dict[int, Any]:
 
 def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
     """
-    Fetch hardware specs from all miner runs in W&B, 
-    attaching corresponding stats from the global 'stats' dict.
+    Fetch hardware specs by looking up W&B runs and matching them to the 
+    hotkey in stats (ignoring the given hotkeys list). For each UID in stats:
+
+      1. If the hotkey is found in W&B, use that run's details.
+      2. Otherwise, compare only the GPU name (gpu_name).
+         - Among all runs with matching gpu_name, find the run whose num_gpus 
+           is the smallest >= the needed num_gpus.
+         - If none are >=, pick the largest smaller one.
+         - If no runs match the gpu_name, details = {}.
+
+    This ensures every UID in stats is returned, including UID=0,
+    and prints a single line for each added UID.
+
+    We add safeguards to skip broken runs or missing data so we don't 
+    get 'NoneType' object has no attribute 'get'.
     """
     global stats
     db_specs_dict: Dict[int, Dict[str, Any]] = {}
     project_path = f"{PUBLIC_WANDB_ENTITY}/{PUBLIC_WANDB_NAME}"
 
-    runs = api.runs(project_path)
     try:
-        for run in runs:
-            run_config = run.config
-            hotkey = run_config.get('hotkey')
-            role = run_config.get('role')
-            details = run_config.get('specs')
-
-            # We only care about miners
-            if hotkey in hotkeys and role == 'miner' and isinstance(details, dict):
-                index = hotkeys.index(hotkey)
-                db_specs_dict[index] = {
-                    "hotkey": hotkey,
-                    "details": details,
-                    "stats": stats.get(index)
-                }
+        runs = api.runs(project_path)
     except Exception as e:
-        print(f"An error occurred while getting specs from wandb: {e}")
+        print(f"An error occurred while fetching runs from wandb: {e}")
+        runs = []
+
+    # Lookups
+    hotkey_run_details: Dict[str, Dict[str, Any]] = {}
+    # Instead of storing (gpu_name, num_gpus)->details, we store:
+    #   gpu_name -> [ (num_gpus, details), (num_gpus, details), ... ]
+    gpu_runs_map: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
+
+    for run in runs:
+        try:
+            run_config = getattr(run, 'config', None)
+            if not run_config or not isinstance(run_config, dict):
+                # Skip runs if config is not a valid dict
+                continue
+
+            role = run_config.get("role", None)
+            if role != "miner":
+                continue
+
+            details = run_config.get("specs", {})
+            if not isinstance(details, dict):
+                continue
+
+            run_hotkey = run_config.get("hotkey", None)
+            if isinstance(run_hotkey, str):
+                hotkey_run_details[run_hotkey] = details
+
+            gpu_name = details.get("gpu_name", None)
+            num_gpus = details.get("num_gpus", None)
+
+            if gpu_name and isinstance(num_gpus, int):
+                if gpu_name not in gpu_runs_map:
+                    gpu_runs_map[gpu_name] = []
+                gpu_runs_map[gpu_name].append((num_gpus, details))
+
+        except Exception as e_run:
+            print(f"Skipping a run due to unexpected error: {e_run}")
+            continue
+
+    # Sort each gpu_name's list by ascending num_gpus for nearest-logic
+    for gname in gpu_runs_map:
+        gpu_runs_map[gname].sort(key=lambda x: x[0])
+
+    # Iterate over stats to build the final db_specs_dict
+    for uid, stat_data in stats.items():
+        if not isinstance(stat_data, dict):
+            db_specs_dict[uid] = {
+                "hotkey": None,
+                "details": {},
+                "stats": stat_data
+            }
+            print(f"UID={uid} | hotkey=None | gpu_name=None | num_gpus=None")
+            continue
+
+        # Pull hotkey/gpu info from stats
+        hotkey = stat_data.get("hotkey")
+        gpu_specs = stat_data.get("gpu_specs", {})
+        if not isinstance(gpu_specs, dict):
+            gpu_specs = {}
+
+        gpu_name = gpu_specs.get("gpu_name", None)
+        num_gpus = gpu_specs.get("num_gpus", None)
+
+        # 1) If there's a W&B run with this hotkey, take that
+        details = {}
+        if hotkey and hotkey in hotkey_run_details:
+            details = hotkey_run_details[hotkey]
+        else:
+            # 2) Otherwise fallback to GPU-based logic: same gpu_name
+            if gpu_name and gpu_name in gpu_runs_map and isinstance(num_gpus, int):
+                # We have a sorted list of (num_gpus_run, details)
+                candidates = gpu_runs_map[gpu_name]
+
+                # Find the smallest run_num_gpus >= actual num_gpus
+                chosen_details = None
+                for (run_num_gpus, run_details) in candidates:
+                    if run_num_gpus >= num_gpus:
+                        chosen_details = run_details
+                        break
+
+                if not chosen_details:
+                    # If none are >=, pick the largest smaller one
+                    chosen_details = candidates[-1][1]  # last item in sorted list
+
+                details = chosen_details
+
+        db_specs_dict[uid] = {
+            "hotkey": hotkey,
+            "details": details,
+            "stats": stat_data
+        }
+
+        # Print a single line for clarity
+        print(f"UID={uid} | hotkey={hotkey} | gpu_name={gpu_name} | num_gpus={num_gpus}")
 
     return db_specs_dict
 
@@ -264,7 +357,7 @@ async def sync_data_periodically():
             )
             penalized_hotkeys_cache = penalized
 
-            await fetch_tao_price()
+            asyncio.create_task(fetch_tao_price())
 
         except Exception as e:
             print(f"An error occurred during periodic sync: {e}")
