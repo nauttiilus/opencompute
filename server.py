@@ -12,6 +12,9 @@ from bittensor.core.subtensor import Subtensor
 import argparse
 import json
 import httpx
+import copy
+import random
+from typing import Dict, List, Any
 
 app = FastAPI()
 
@@ -56,76 +59,137 @@ def fetch_validator_stats(api, run_path: str) -> Dict[int, Any]:
         print(f"Error fetching validator stats from {run_path}: {e}")
     return {}
 
+def interpolate_details(
+    donor_details: Dict[str, Any],
+    donor_gpu_count: int,
+    target_gpu_count: int
+) -> Dict[str, Any]:
+    """
+    Scales certain fields in 'donor_details' from 'donor_gpu_count' to 'target_gpu_count':
+      - cpu.count
+      - gpu.count
+      - gpu.capacity
+      - gpu.details[*].capacity
+      - ram.{total,used,free,available}
+    Also applies a random multiplier (1.1 to 1.9) to disk space fields.
+    Leaves cpu.frequency, disk read/write speeds, etc., unchanged.
+
+    Returns a deep copy, not altering the original.
+    """
+    new_data = copy.deepcopy(donor_details)
+
+    # If donor or target is invalid or the same, no scaling
+    if donor_gpu_count <= 0 or target_gpu_count <= 0 or donor_gpu_count == target_gpu_count:
+        # We still apply the disk multiplier, even if GPU counts match
+        pass
+    else:
+        scale_factor = float(target_gpu_count) / float(donor_gpu_count)
+
+        # ----- Scale CPU.count -----
+        cpu_section = new_data.get("cpu", {})
+        if isinstance(cpu_section.get("count"), (int, float)):
+            old_val = cpu_section["count"]
+            cpu_section["count"] = old_val * scale_factor
+            # If you prefer an integer, do: cpu_section["count"] = int(old_val * scale_factor)
+
+        # ----- Scale GPU -----
+        gpu_section = new_data.get("gpu", {})
+        if isinstance(gpu_section, dict):
+            # Force GPU count to the new target
+            gpu_section["count"] = target_gpu_count
+
+            # Scale total GPU capacity if present
+            if "capacity" in gpu_section and isinstance(gpu_section["capacity"], (int, float)):
+                gpu_section["capacity"] *= scale_factor
+
+            # Scale capacity of each GPU in 'details'
+            details_list = gpu_section.get("details", [])
+            if isinstance(details_list, list):
+                for g in details_list:
+                    if isinstance(g, dict) and isinstance(g.get("capacity"), (int, float)):
+                        g["capacity"] *= scale_factor
+
+        # ----- Scale certain RAM fields -----
+        ram_section = new_data.get("ram", {})
+        if isinstance(ram_section, dict):
+            for field in ["total", "free", "used", "available"]:
+                val = ram_section.get(field)
+                if isinstance(val, (int, float)) and val > 0:
+                    ram_section[field] = val * scale_factor
+
+    # ----- Random multiplier for hard disk fields (total, free, used) -----
+    hard_disk_section = new_data.get("hard_disk", {})
+    if isinstance(hard_disk_section, dict):
+        disk_factor = random.uniform(1.1, 1.9)
+        for field in ["total", "used", "free"]:
+            val = hard_disk_section.get(field)
+            if isinstance(val, (int, float)) and val > 0:
+                hard_disk_section[field] = val * disk_factor
+
+    return new_data
+
 def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
     """
-    Fetch hardware specs by looking up W&B runs and matching them to the 
-    hotkey in stats (ignoring the given hotkeys list). For each UID in stats:
+    1) Pull all W&B runs once (project path).
+       - store hotkey -> specs in 'wandb_hotkey_map'.
 
-      1. If the hotkey is found in W&B, use that run's details.
-      2. Otherwise, compare only the GPU name (gpu_name).
-         - Among all runs with matching gpu_name, find the run whose num_gpus 
-           is the smallest >= the needed num_gpus.
-         - If none are >=, pick the largest smaller one.
-         - If no runs match the gpu_name, details = {}.
+    2) For each UID in stats:
+       A) If we have W&B details for that hotkey, use them directly.
+       B) Otherwise, find any other hotkey in stats that has the 
+          same GPU name *and* W&B details. Copy & scale if needed.
+       C) If no fallback found, use empty {}.
 
-    This ensures every UID in stats is returned, including UID=0,
-    and prints a single line for each added UID.
+    3) Return a dict keyed by UID with {hotkey, details, stats}.
+    4) Print a single line for debugging each UID.
 
-    We add safeguards to skip broken runs or missing data so we don't 
-    get 'NoneType' object has no attribute 'get'.
+    Now includes a random disk multiplier between 1.1 and 1.9.
     """
     global stats
     db_specs_dict: Dict[int, Dict[str, Any]] = {}
     project_path = f"{PUBLIC_WANDB_ENTITY}/{PUBLIC_WANDB_NAME}"
 
+    # --- 1) Build hotkey -> specs map from W&B
+    wandb_hotkey_map: Dict[str, Dict[str, Any]] = {}
     try:
         runs = api.runs(project_path)
-    except Exception as e:
-        print(f"An error occurred while fetching runs from wandb: {e}")
-        runs = []
-
-    # Lookups
-    hotkey_run_details: Dict[str, Dict[str, Any]] = {}
-    # Instead of storing (gpu_name, num_gpus)->details, we store:
-    #   gpu_name -> [ (num_gpus, details), (num_gpus, details), ... ]
-    gpu_runs_map: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
-
-    for run in runs:
-        try:
+        for run in runs:
             run_config = getattr(run, 'config', None)
             if not run_config or not isinstance(run_config, dict):
-                # Skip runs if config is not a valid dict
+                continue
+            if run_config.get("role") != "miner":
                 continue
 
-            role = run_config.get("role", None)
-            if role != "miner":
-                continue
-
-            details = run_config.get("specs", {})
+            details = run_config.get("specs")
             if not isinstance(details, dict):
                 continue
 
-            run_hotkey = run_config.get("hotkey", None)
+            run_hotkey = run_config.get("hotkey")
             if isinstance(run_hotkey, str):
-                hotkey_run_details[run_hotkey] = details
+                wandb_hotkey_map[run_hotkey] = details
+    except Exception as e:
+        print(f"An error occurred while fetching runs from wandb: {e}")
 
-            gpu_name = details.get("gpu_name", None)
-            num_gpus = details.get("num_gpus", None)
+    # --- 2) Identify all hotkeys in stats that DO have W&B details, grouped by GPU name
+    hotkeys_by_gpu_name = {}  # gpu_name -> list of hotkeys in W&B
+    stats_gpu_map = {}        # hotkey -> (gpu_name, gpu_count)
 
-            if gpu_name and isinstance(num_gpus, int):
-                if gpu_name not in gpu_runs_map:
-                    gpu_runs_map[gpu_name] = []
-                gpu_runs_map[gpu_name].append((num_gpus, details))
-
-        except Exception as e_run:
-            print(f"Skipping a run due to unexpected error: {e_run}")
+    for uid, stat_data in stats.items():
+        if not isinstance(stat_data, dict):
+            continue
+        st_hotkey = stat_data.get("hotkey")
+        gpu_info = stat_data.get("gpu_specs", {})
+        if not isinstance(st_hotkey, str) or not isinstance(gpu_info, dict):
             continue
 
-    # Sort each gpu_name's list by ascending num_gpus for nearest-logic
-    for gname in gpu_runs_map:
-        gpu_runs_map[gname].sort(key=lambda x: x[0])
+        gpu_name = gpu_info.get("gpu_name")
+        gpu_count = gpu_info.get("num_gpus")
+        stats_gpu_map[st_hotkey] = (gpu_name, gpu_count)
 
-    # Iterate over stats to build the final db_specs_dict
+        # If this hotkey is in W&B, add it to fallback donors for that gpu_name
+        if st_hotkey in wandb_hotkey_map and isinstance(gpu_name, str):
+            hotkeys_by_gpu_name.setdefault(gpu_name, []).append(st_hotkey)
+
+    # --- 3) For each UID, build final details
     for uid, stat_data in stats.items():
         if not isinstance(stat_data, dict):
             db_specs_dict[uid] = {
@@ -136,46 +200,53 @@ def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
             print(f"UID={uid} | hotkey=None | gpu_name=None | num_gpus=None")
             continue
 
-        # Pull hotkey/gpu info from stats
-        hotkey = stat_data.get("hotkey")
-        gpu_specs = stat_data.get("gpu_specs", {})
-        if not isinstance(gpu_specs, dict):
-            gpu_specs = {}
+        st_hotkey = stat_data.get("hotkey")
+        gpu_info = stat_data.get("gpu_specs", {})
+        if not isinstance(st_hotkey, str) or not isinstance(gpu_info, dict):
+            # No valid hotkey or GPU info
+            db_specs_dict[uid] = {
+                "hotkey": st_hotkey,
+                "details": {},
+                "stats": stat_data
+            }
+            print(f"UID={uid} | hotkey={st_hotkey} | gpu_name=None | num_gpus=None")
+            continue
 
-        gpu_name = gpu_specs.get("gpu_name", None)
-        num_gpus = gpu_specs.get("num_gpus", None)
+        needed_gpu_name = gpu_info.get("gpu_name")
+        needed_gpu_count = gpu_info.get("num_gpus")
 
-        # 1) If there's a W&B run with this hotkey, take that
-        details = {}
-        if hotkey and hotkey in hotkey_run_details:
-            details = hotkey_run_details[hotkey]
+        final_details = {}
+
+        # (A) Direct W&B match for this hotkey?
+        if st_hotkey in wandb_hotkey_map:
+            final_details = copy.deepcopy(wandb_hotkey_map[st_hotkey])
+
+            # If GPU counts differ, scale
+            donor_gpu_name, donor_gpu_count = stats_gpu_map[st_hotkey]
+            if isinstance(donor_gpu_count, int) and isinstance(needed_gpu_count, int):
+                final_details = interpolate_details(final_details, donor_gpu_count, needed_gpu_count)
+
         else:
-            # 2) Otherwise fallback to GPU-based logic: same gpu_name
-            if gpu_name and gpu_name in gpu_runs_map and isinstance(num_gpus, int):
-                # We have a sorted list of (num_gpus_run, details)
-                candidates = gpu_runs_map[gpu_name]
+            # (B) Fallback: same GPU name => pick any "donor" that has W&B
+            if isinstance(needed_gpu_name, str) and (needed_gpu_name in hotkeys_by_gpu_name):
+                donor_list = hotkeys_by_gpu_name[needed_gpu_name]
+                if donor_list:
+                    donor_hotkey = donor_list[0]  # pick the first or refine logic if needed
+                    donor_details = wandb_hotkey_map[donor_hotkey]
+                    final_details = copy.deepcopy(donor_details)
 
-                # Find the smallest run_num_gpus >= actual num_gpus
-                chosen_details = None
-                for (run_num_gpus, run_details) in candidates:
-                    if run_num_gpus >= num_gpus:
-                        chosen_details = run_details
-                        break
-
-                if not chosen_details:
-                    # If none are >=, pick the largest smaller one
-                    chosen_details = candidates[-1][1]  # last item in sorted list
-
-                details = chosen_details
+                    # Scale if needed
+                    donor_gpu_name, donor_gpu_count = stats_gpu_map[donor_hotkey]
+                    if isinstance(donor_gpu_count, int) and isinstance(needed_gpu_count, int):
+                        final_details = interpolate_details(final_details, donor_gpu_count, needed_gpu_count)
 
         db_specs_dict[uid] = {
-            "hotkey": hotkey,
-            "details": details,
+            "hotkey": st_hotkey,
+            "details": final_details,
             "stats": stat_data
         }
 
-        # Print a single line for clarity
-        print(f"UID={uid} | hotkey={hotkey} | gpu_name={gpu_name} | num_gpus={num_gpus}")
+        print(f"UID={uid} | hotkey={st_hotkey} | gpu_name={needed_gpu_name} | num_gpus={needed_gpu_count}")
 
     return db_specs_dict
 
