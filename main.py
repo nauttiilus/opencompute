@@ -5,432 +5,326 @@ import pandas as pd
 import requests
 import matplotlib.pyplot as plt
 import base64
-import plotly.graph_objects as go # type: ignore
-import plotly.express as px  # type: ignore # Interactive chart
+import plotly.graph_objects as go  # type: ignore
+import plotly.express as px        # type: ignore
 
-# Configure Streamlit page
-logo_path = "Icon_White_crop.png"  # Update this with the correct path to your logo
-st.set_page_config(page_title="NI-Compute", layout="wide", page_icon=logo_path)
+# ────────────────────────── ENV & GLOBALS ────────────────────────────
+load_dotenv()
 
-# Set Sidebar Logo
-logo_path2 = "Neural_Internet_White_crop.png"
-st.logo(logo_path2, size="large", link=None, icon_image=None)
-
-# Inject Custom CSS to Resize the Logo
-st.markdown(
+def get_config(key, default=None):
     """
-    <style>
-        img[data-testid="stLogo"] {
-            height: 8rem !important;
-            width: auto !important;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+    Priority:
+    1. Local .env (os.getenv)
+    2. Streamlit Cloud secrets (st.secrets)
+    3. Default value
+    """
+    # 1. Check .env / local environment
+    env_value = os.getenv(key)
+    if env_value not in (None, ""):
+        return env_value
 
-# Server details
-SERVER_IP = "65.108.33.88"
-SERVER_PORT = "8000"
-SERVER_URL = f"http://{SERVER_IP}:{SERVER_PORT}"
+    # 2. Check Streamlit secrets (only if they exist)
+    if hasattr(st, "secrets") and len(st.secrets) > 0:
+        return st.secrets.get(key, default)
 
-# Function to fetch data
-def get_data_from_server(endpoint):
+    # 3. Use default
+    return default
+
+# Config values
+ADMIN_PASSWORD = get_config("ADMIN_PASSWORD", "")
+ADMIN_KEY      = get_config("ADMIN_KEY", "")
+SERVER_IP      = get_config("SERVER_IP", "65.108.33.88")
+SERVER_PORT    = get_config("SERVER_PORT", "8000")
+
+SERVER_URL     = f"http://{SERVER_IP}:{SERVER_PORT}"
+BLUE           = "#1976D2"
+
+st.set_page_config(page_title="NI-Compute", layout="wide", page_icon="Icon_White_crop.png")
+
+# ─────────────────────────── CSS ─────────────────────────────
+st.markdown(f"""
+<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+<style>
+  img[data-testid="stLogo"] {{
+    height: 8rem !important;
+    width: auto !important;
+  }}
+  .icon {{
+    font-family: 'Material Icons';
+    font-size: 18px;
+    vertical-align: middle;
+    margin-right: 5px;
+    color: {BLUE} !important;
+  }}
+  a {{
+    color: {BLUE} !important;
+    text-decoration: none;
+            font-weight: light;
+  }}
+  a:hover {{
+    text-decoration: underline;
+  }}
+  .stProgress > div > div > div > div {{
+    background-color: {BLUE} !important;
+  }}
+</style>
+""", unsafe_allow_html=True)
+
+st.logo("Neural_Internet_White_crop.png", size="large")
+
+# ───────────────────────── SERVER CALL ────────────────────────
+def get_data_from_server(endpoint: str):
     try:
-        response = requests.get(f"{SERVER_URL}/{endpoint}", timeout=5)
-        if response.status_code == 200:
-            return response.json() or {}  # Ensure a valid dictionary is returned
-        else:
-            st.error(f"Failed to fetch {endpoint}: {response.status_code}")
-    except requests.exceptions.RequestException as e:
+        r = requests.get(f"{SERVER_URL}/{endpoint}", timeout=5)
+        r.raise_for_status()
+        return r.json() or {}
+    except Exception as e:
         st.error(f"Error fetching {endpoint}: {e}")
-    
-    return {}  # Always return an empty dictionary on failure
+        return {}
 
-# Function to display hardware specs
+# ─────────────────────── SIDEBAR LOGIN (no button) ────────────────────────
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+def _login_cb():
+    """Called when the user presses Enter in the password box."""
+    if st.session_state.get("admin_pwd", "") == ADMIN_PASSWORD:
+        st.session_state.authenticated = True
+    else:
+        st.sidebar.error("❌ Invalid password")
+
+with st.sidebar:
+    if not st.session_state.authenticated:
+        # on_change fires when they hit Enter
+        st.text_input(
+            "Admin Login",
+            type="password",
+            key="admin_pwd",
+            on_change=_login_cb
+        )
+    else:
+        if st.button("Logout"):
+            # 1) log them out
+            st.session_state.authenticated = False
+            # 2) clear the saved password so the box is empty on next show
+            if "admin_pwd" in st.session_state:
+                del st.session_state["admin_pwd"]
+            # 3) rerun so the login box immediately pops back
+            st.rerun()
+
+# ───────────────────────── HELPERS ───────────────────────────
 def display_hardware_specs(specs_details, allocated_keys, penalized_keys, metagraph_data):
-    """Displays a professional, interactive hardware specs table in Streamlit with correct sorting and incentive data."""
-
     column_headers = [
         "UID", "Hotkey", "Incentive", "GPU Name", "GPU Capacity (GiB)", "GPU Count",
         "CPU Count", "RAM (GiB)", "Disk Space (GiB)", "Status", "PoG Status", "Penalized"
     ]
-
-    # Fetch incentives from metagraph data (default to 0 if missing)
-    incentives_dict = dict(zip(metagraph_data.get("uids", []), metagraph_data.get("incentive", [])))
-
+    incentives = dict(zip(
+        metagraph_data.get("uids", []),
+        metagraph_data.get("incentive", [])
+    ))
     table_data = []
 
-    for index in sorted(specs_details.keys(), key=lambda x: int(x)):  # ✅ Sort UIDs numerically
-        item = specs_details.get(index, {})
+    for idx in sorted(specs_details.keys(), key=int):
+        item = specs_details.get(idx, {}) or {}
+        stats = item.get("stats", {}) or {}
+        det   = item.get("details", {}) or {}
+        hotkey = item.get("hotkey", "unknown")
 
-        if not item or not isinstance(item, dict):
-            table_data.append([int(index), "No item", 0, "N/A", 0, 0, 0, 0, 0, "N/A", "Unverified", "No"])  # ✅ Updated PoG label
-            continue
+        # Raw values from stats
+        raw_gpu_name = stats.get("gpu_name")
+        raw_gpu_num = stats.get("gpu_num")
 
-        stats_data = item.get('stats', {}) or {}
-        hotkey = item.get('hotkey', 'unknown')  # ✅ Full hotkey (no truncation)
-        details = item.get('details', {}) or {}
+        # Display values (fallback to "N/A")
+        gpu_name = raw_gpu_name if raw_gpu_name else "N/A"
+        gpu_num = raw_gpu_num if isinstance(raw_gpu_num, (int, float)) and raw_gpu_num > 0 else "N/A"
 
-        # Extract relevant data (ensuring correct numeric values)
-        gpu_specs = stats_data.get('gpu_specs', {}) or {}
-        gpu_name = gpu_specs.get('gpu_name', "N/A")
-        gpu_count = gpu_specs.get('num_gpus', 0)
+        cap = (det.get("gpu", {}) or {}).get("capacity", 0) / 1024
+        cpu = (det.get("cpu", {}) or {}).get("count", 0)
+        ram = (det.get("ram", {}) or {}).get("available", 0) / (1024**3)
+        disk = (det.get("hard_disk", {}) or {}).get("free", 0) / (1024**3)
 
-        gpu_miner = details.get('gpu', {}) or {}
-        gpu_capacity = gpu_miner.get('capacity', 0) / 1024 if isinstance(gpu_miner, dict) else 0  # ✅ Convert to GiB, ensure numeric
-
-        cpu_miner = details.get('cpu', {}) or {}
-        cpu_count = cpu_miner.get('count', 0) if isinstance(cpu_miner, dict) else 0  # ✅ Ensure numeric
-
-        ram_miner = details.get('ram', {}) or {}
-        ram_gib = ram_miner.get('available', 0) / (1024.0**3) if isinstance(ram_miner, dict) else 0  # ✅ Convert to GiB, ensure numeric
-
-        hard_disk_miner = details.get('hard_disk', {}) or {}
-        disk_gib = hard_disk_miner.get('free', 0) / (1024.0**3) if isinstance(hard_disk_miner, dict) else 0  # ✅ Convert to GiB, ensure numeric
-
-        # Allocated & Penalized
         status = "Res." if hotkey in allocated_keys else "Avail."
-        pog_status = "Pass" if gpu_specs else "Fail"  # ✅ Updated PoG Status label
-        penalized = "Yes" if hotkey in penalized_keys else "No"  # ✅ Penalization status
-
-        # Get incentive for this UID (default to 0 if missing)
-        incentive = incentives_dict.get(int(index), 0)
+        pog = "Pass" if raw_gpu_name and raw_gpu_num else "Fail"
+        pen = "Yes" if hotkey in penalized_keys else "No"
 
         table_data.append([
-            int(index),  # ✅ UID stored as an integer for correct sorting
-            hotkey,  # ✅ Full hotkey displayed (not truncated)
-            round(incentive, 6),  # ✅ Moved Incentive column right after Hotkey
-            gpu_name, round(gpu_capacity, 2), int(gpu_count),
-            int(cpu_count), round(ram_gib, 2), round(disk_gib, 2), status, pog_status, penalized  # ✅ Penalized info is now last column
+            int(idx),
+            hotkey,
+            round(incentives.get(int(idx), 0), 6),
+            gpu_name,
+            round(cap, 2),
+            gpu_num,
+            cpu, round(ram, 2), round(disk, 2),
+            status, pog, pen
         ])
 
-    # Convert to DataFrame
-    df = pd.DataFrame(table_data, columns=column_headers)
-
-    # ✅ Ensure no extra row by resetting index
-    df = df.set_index("UID")  # ✅ Removes automatic index, UID becomes the first column
-
-    # ✅ Remove automatic index column and enable proper sorting
+    df = pd.DataFrame(table_data, columns=column_headers).set_index("UID")
     st.dataframe(df.style.format({
         "GPU Capacity (GiB)": "{:.2f}",
         "RAM (GiB)": "{:.2f}",
         "Disk Space (GiB)": "{:.2f}",
-        "Incentive": "{:.6f}",  # ✅ Display incentives with 6 decimal places
-    }), use_container_width=True, height=1000)  # ✅ Unlimited height (high enough to show all)
+        "Incentive": "{:.6f}",
+    }), use_container_width=True, height=1000)
 
-
-# Function to plot Incentive vs UID
 def plot_incentive_vs_uid(metagraph_data):
-    """Plots incentive vs UID number with a modern, dark theme."""
     if not metagraph_data or "uids" not in metagraph_data or "incentive" not in metagraph_data:
         st.error("Incomplete metagraph data. Try again later.")
         return
-
-    uids = metagraph_data["uids"]
-    incentives = metagraph_data["incentive"]
-
-    # Ensure valid data
-    if not uids or not incentives or len(uids) != len(incentives):
-        st.error("Inconsistent data in metagraph response.")
-        return
-
-    # Convert lists to DataFrame
-    df = pd.DataFrame({"UID": uids, "Incentive": incentives})
-
-    # Sort incentives in descending order but keep UIDs unsorted
-    df = df.sort_values(by="Incentive", ascending=True)  # Lowest incentive on the left
-
-    # Create scatter plot with Plotly (high resolution & dark theme)
-    fig = go.Figure()
-
-    fig.add_trace(go.Scatter(
-        x=list(range(len(df))),  # Just tick indices, not sorted UIDs
+    df = pd.DataFrame({
+        "UID": metagraph_data["uids"],
+        "Incentive": metagraph_data["incentive"]
+    }).sort_values("Incentive", ascending=True)
+    fig = go.Figure(go.Scatter(
+        x=list(range(len(df))),
         y=df["Incentive"],
-        mode='markers',  # Scatter plot (dots only)
-        marker=dict(
-            size=8, 
-            color=df["Incentive"],  # Color based on incentive value
-            colorscale="reds",  # Professional gradient color
-            showscale=True
-        ),
+        mode="markers",
+        marker=dict(size=8, color=df["Incentive"], colorscale="Blues", showscale=True)
     ))
-
-    # Custom styling
     fig.update_layout(
         title="Incentive Distribution",
-        xaxis=dict(
-            title="Miners",
-            showticklabels=False,  # Hide numbers on x-axis (ticks only)
-        ),
-        yaxis=dict(
-            title="Incentive",
-            gridcolor="gray"
-        ),
-        template="plotly_dark",  # Dark mode to match Streamlit
-        margin=dict(l=40, r=40, t=50, b=40),  # Clean margins
+        xaxis=dict(title="Miners", showticklabels=False),
+        yaxis=dict(title="Incentive", gridcolor="gray"),
+        template="plotly_dark",
+        margin=dict(l=40, r=40, t=50, b=40),
     )
-
-    # Display interactive plot
     st.plotly_chart(fig, use_container_width=True)
 
-# Define pages
+# ───────────────────────── PAGES ─────────────────────────────
 def dashboard():
-    st.title("Dashboard - NI Compute")
-    load_dotenv()
-
-    with st.spinner('Fetching data from server...'):
-        try:
-            hotkeys_response = get_data_from_server("keys")
-            hotkeys = hotkeys_response.get("keys", [])
-
-            specs_response = get_data_from_server("specs")
-            specs_details = specs_response.get("specs", {})
-
-            allocated_keys_response = get_data_from_server("allocated_keys")
-            allocated_keys = allocated_keys_response.get("allocated_keys", [])
-
-            penalized_keys_response = get_data_from_server("penalized_keys")
-            penalized_keys = penalized_keys_response.get("penalized_keys", [])
-
-            # Fetch metagraph data
-            metagraph_response = get_data_from_server("metagraph")
-            metagraph_data = metagraph_response.get("metagraph", {})
-
-        except Exception as e:
-            st.error(f"Error fetching data: {e}")
-            specs_details, allocated_keys, penalized_keys, metagraph_data = {}, [], [], {}
-
-    # Plot incentive vs UID
-    #st.subheader("Incentive Distribution by Miner")
-    try:
-        plot_incentive_vs_uid(metagraph_data)
-    except Exception as e:
-        st.error(f"Unable to generate incentive plot: {e}")
-
-    # Display specs
-    try:
-        display_hardware_specs(specs_details, allocated_keys, penalized_keys, metagraph_data)
-    except Exception as e:
-        st.error(f"Unable to fetch or display data: {e}")
-
-import streamlit as st
-import pandas as pd
-
-import streamlit as st
-import pandas as pd
+    st.title("Dashboard – NI Compute")
+    with st.spinner("Loading..."):
+        specs = get_data_from_server("specs").get("specs", {})
+        alloc = get_data_from_server("allocated_keys").get("allocated_keys", [])
+        pen   = get_data_from_server("penalized_keys").get("penalized_keys", [])
+        meta  = get_data_from_server("metagraph").get("metagraph", {})
+    plot_incentive_vs_uid(meta)
+    display_hardware_specs(specs, alloc, pen, meta)
 
 def metagraph():
-    """Displays Metagraph information using fetched metagraph_data from the API."""
-
     st.title("Metagraph Data")
-
-    # Fetch metagraph data from API
-    with st.spinner("Fetching metagraph data..."):
-        metagraph_response = get_data_from_server("metagraph")
-        metagraph_data = metagraph_response.get("metagraph", {})
-
-    if not metagraph_data or "uids" not in metagraph_data:
-        st.error("Metagraph data not available. Please try again later.")
-        return
-
-    # Extract data from metagraph_data
-    uids = metagraph_data.get("uids", [])
-    hotkeys = metagraph_data.get("hotkeys", [])
-    active = metagraph_data.get("active", [])
-    stake = metagraph_data.get("stake", [])
-    trust = metagraph_data.get("trust", [])
-    v_trust = metagraph_data.get("validator_trust", [])
-    v_permit = metagraph_data.get("validator_permit", [])
-    axons = metagraph_data.get("axons", [])  # Contains IP, port, and version
-
-    miner_version_summary = {}
-    validator_version_summary = {}
-
-    # Prepare DataFrame
-    data = []
-
+    with st.spinner("Loading..."):
+        data = get_data_from_server("metagraph").get("metagraph", {})
+    if not data or "uids" not in data:
+        st.error("Metagraph data not available."); return
+    uids   = data["uids"]
+    hot    = data["hotkeys"]
+    act    = data["active"]
+    stake  = data["stake"]
+    trust  = data["trust"]
+    v_trust= data["validator_trust"]
+    v_perm = data["validator_permit"]
+    axons  = data["axons"]
+    miner_ver = {}
+    val_ver   = {}
+    rows = []
     for i, uid in enumerate(uids):
-        axon = axons[i] if axons and len(axons) > i else {}
-        ip = axon.get("ip", "N/A")
-        port = axon.get("port", "N/A")
-        version = axon.get("version", "N/A")  # ✅ Correctly fetching axon version
-
-        # Track versions for miners and validators
+        ax = axons[i] if i < len(axons) else {}
+        ip = ax.get("ip", "N/A")
+        port = ax.get("port", "N/A")
+        ver  = ax.get("version", "N/A")
         if v_trust[i] == 0:
-            miner_version_summary[version] = miner_version_summary.get(version, 0) + 1
+            miner_ver[ver] = miner_ver.get(ver, 0) + 1
         else:
-            validator_version_summary[version] = validator_version_summary.get(version, 0) + 1
-
-        data.append([
-            uid, hotkeys[i], active[i], round(stake[i], 6), round(trust[i], 6), 
-            v_permit[i], round(v_trust[i], 6), ip, port, version
+            val_ver[ver] = val_ver.get(ver, 0) + 1
+        rows.append([
+            uid, hot[i], act[i],
+            round(stake[i],6), round(trust[i],6),
+            v_perm[i], round(v_trust[i],6),
+            ip, port, ver
         ])
-
-    # Create DataFrame
-    columns = ['UID', 'Hotkey', 'Active', 'Stake', 'Trust', 'V_Permit', 'V_Trust', 'IP', 'Port', 'Version']
-    df = pd.DataFrame(data, columns=columns)
-
-    # Display Metagraph Nodes Data
-    st.write("### Metagraph Nodes Data")
+    cols = ['UID','Hotkey','Active','Stake','Trust','V_Permit','V_Trust','IP','Port','Version']
+    df = pd.DataFrame(rows, columns=cols)
     st.dataframe(df.style.format({
-        "Stake": "{:.6f}",
-        "Trust": "{:.6f}",
-        "V_Trust": "{:.6f}",
+        "Stake":"{:.6f}", "Trust":"{:.6f}", "V_Trust":"{:.6f}"
     }), use_container_width=True, height=800)
-
-    col1, col2 = st.columns([1, 1])  # Use only the first column (50% width)
-
-    # Validator Version Summary
-    validator_count = sum(validator_version_summary.values())
-    validator_summary_data = [
-        {"Version": version, "Count": count, "Percentage": (count / validator_count * 100)}
-        for version, count in validator_version_summary.items()
-    ]
-    validator_summary_df = pd.DataFrame(validator_summary_data)
-
+    vtot = sum(val_ver.values()); mtot = sum(miner_ver.values())
+    col1, col2 = st.columns(2)
+    val_df = pd.DataFrame([
+        {"Version":k,"Count":c,"Percentage":c/vtot*100}
+        for k,c in val_ver.items()
+    ])
+    min_df = pd.DataFrame([
+        {"Version":k,"Count":c,"Percentage":c/mtot*100}
+        for k,c in miner_ver.items()
+    ])
     col2.write("### Validator Version Summary")
-    col2.write(f"Total Validator Count: {validator_count}")
-    col2.dataframe(validator_summary_df.style.format({"Percentage": "{:.2f}%"}), use_container_width=True)
-
-    # Miner Version Summary
-    miner_count = sum(miner_version_summary.values())
-    miner_summary_data = [
-        {"Version": version, "Count": count, "Percentage": (count / miner_count * 100)}
-        for version, count in miner_version_summary.items()
-    ]
-    miner_summary_df = pd.DataFrame(miner_summary_data)
-
+    col2.write(f"Total Validators: {vtot}")
+    col2.dataframe(val_df.style.format({"Percentage":"{:.2f}%"}), use_container_width=True)
     col1.write("### Miner Version Summary")
-    col1.write(f"Total Miner Count: {miner_count}")
-    col1.dataframe(miner_summary_df.style.format({"Percentage": "{:.2f}%"}), use_container_width=True)
+    col1.write(f"Total Miners: {mtot}")
+    col1.dataframe(min_df.style.format({"Percentage":"{:.2f}%"}), use_container_width=True)
 
 # Define supported GPU models
 SUPPORTED_GPUS = {
-    "NVIDIA B200:": "B200",
+    "NVIDIA B200": "B200",
     "NVIDIA H200": "H200",
     "NVIDIA H100 80GB HBM3": "H100 80GB HBM3",
-    "NVIDIA H100": "H100 80GB PCIE",
+    "NVIDIA H100": "H100 80GB PCIE",           # generic match for PCIe variant
+    "NVIDIA H100 PCIe": "H100 80GB PCIE",
+    "NVIDIA H100 NVL": "H100 NVL",
     "NVIDIA A100-SXM4-80GB": "A100 80GB SXM4",
     "NVIDIA A100-SXM4-40GB": "A100 40GB SXM4",
-    "NVIDIA GeForce RTX 5090": "RTX 5090",
-    "NVIDIA L40s": "L40s",
-    "NVIDIA RTX 6000 Ada Generation": "RTXA6000 Ada",
+    "NVIDIA A100 80GB PCIe": "A100 80GB PCIE",
+    "NVIDIA L40S": "L40S",
     "NVIDIA L40": "L40",
+    "NVIDIA A40": "A40",
+    "NVIDIA GeForce RTX 5090": "RTX 5090",
+    "NVIDIA RTX 6000 Ada Generation": "RTX 6000 Ada",
     "NVIDIA RTX A6000": "RTX A6000",
-    "NVIDIA RTX 4090": "RTX 4090",
-    "NVIDIA RTX A5000": "RTX A5000"
+    "NVIDIA RTX A5000": "RTX A5000",
+    "NVIDIA RTX A4500": "RTX A4500",
+    "NVIDIA RTX 4000 Ada Generation": "RTX 4000 Ada",
+    "NVIDIA GeForce RTX 4090": "RTX 4090",
+    "NVIDIA GeForce RTX 3090": "RTX 3090",
+    "NVIDIA L4": "L4"
 }
 
 OTHER_GPU_LABEL = "Other GPUs"
 
 def stats():
-    """Network Statistics Page"""
     st.title("Network Statistics")
-
-    with st.spinner('Fetching data from server...'):
-        try:
-            allocated_keys_response = get_data_from_server("allocated_keys")
-            allocated_keys = allocated_keys_response.get("allocated_keys", [])
-
-        except Exception as e:
-            st.error(f"Error fetching data: {e}")
-            allocated_keys = []
-
-    # Fetch data from the server
-    with st.spinner("Fetching data..."):
-        specs_response = get_data_from_server("specs")
-        specs_details = specs_response.get("specs", {})
-
-    if not specs_details:
-        st.error("No data available. Try again later.")
-        return
-
-    # Extract GPU information
-    gpu_counts = {}  # Total GPUs per type
-    rented_gpu_counts = {}  # Allocated GPUs per type
-    total_gpus = 0
-
-    for item in specs_details.values():
-        stats_data = item.get('stats', {}) or {}
-        gpu_specs = stats_data.get('gpu_specs', {}) or {}
-
-        gpu_name = gpu_specs.get('gpu_name', "Unknown GPU")
-        num_gpus = gpu_specs.get('num_gpus', 0)
-        status = "Res." if item.get('hotkey', '') in allocated_keys else "Avail."  # Check if allocated
-
-        # Categorize GPUs
-        if gpu_name in SUPPORTED_GPUS:
-            gpu_label = SUPPORTED_GPUS[gpu_name]
-        else:
-            gpu_label = OTHER_GPU_LABEL  # Group all non-supported GPUs
-
-        # Total GPU count
-        if gpu_label not in gpu_counts:
-            gpu_counts[gpu_label] = 0
-        gpu_counts[gpu_label] += num_gpus
-        total_gpus += num_gpus
-
-        # Count rented GPUs
-        if status == "Res.":
-            if gpu_label not in rented_gpu_counts:
-                rented_gpu_counts[gpu_label] = 0
-            rented_gpu_counts[gpu_label] += num_gpus
-
-    # Convert GPU data into a DataFrame
+    with st.spinner("Loading..."):
+        alloc = get_data_from_server("allocated_keys").get("allocated_keys", [])
+        specs = get_data_from_server("specs").get("specs", {})
+    if not specs:
+        st.error("No data available."); return
+    gpu_counts = {}
+    rented_gpu = {}
+    total = 0
+    for itm in specs.values():
+        sd = itm.get("stats",{}) or {}
+        name = sd.get("gpu_name","Unknown GPU")
+        raw_cnt = sd.get("gpu_num")
+        cnt = int(raw_cnt) if isinstance(raw_cnt, (int, float)) else 0
+        status = "Res." if itm.get("hotkey","") in alloc else "Avail."
+        lbl = SUPPORTED_GPUS.get(name, OTHER_GPU_LABEL)
+        gpu_counts[lbl] = gpu_counts.get(lbl,0)+cnt
+        total += cnt
+        if status=="Res.":
+            rented_gpu[lbl] = rented_gpu.get(lbl,0)+cnt
     gpu_data = pd.DataFrame([
-        {
-            "GPU Model": gpu, 
-            "Count": count, 
-            "Rented": rented_gpu_counts.get(gpu, 0), 
-            "Percentage": (count / total_gpus) * 100
-        }
-        for gpu, count in gpu_counts.items()
-    ])
-
-    # Sort the table by GPU count
-    gpu_data = gpu_data.sort_values(by="Count", ascending=False)
-
-    # Create a 2-column layout
-    col1, col2 = st.columns([1.5, 2])  # Adjust width ratio (table slightly narrower than chart)
-
-    # 📊 Column 1: Pie Chart + Table
-    with col1:
-        # 🎯 **Pie Chart: GPU Distribution** 
+        {"GPU Model":g, "Count":c,
+         "Rented":rented_gpu.get(g,0),
+         "Percentage":(c/total*100) if total else 0}
+        for g,c in gpu_counts.items()
+    ]).sort_values("Count",ascending=False)
+    c1, c2 = st.columns([1.5,2])
+    with c1:
         st.markdown("#### GPU Distribution")
-        fig = px.pie(
-            gpu_data, 
-            names="GPU Model", 
-            values="Count", 
-            title="", 
-            color_discrete_sequence=px.colors.sequential.Reds
-        )
-
-        # Adjust layout for better visual balance
-        fig.update_layout(
-            width=800,  # Bigger chart
-            height=600,  # Bigger height
-            showlegend=True, 
-            legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)  # ✅ Move legend below chart
-        )
-
-        # Display the pie chart
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.dataframe(gpu_data.style.format({"Percentage": "{:.2f}%"}), use_container_width=True)
-
+        fig = px.pie(gpu_data,names="GPU Model",values="Count",
+                     color_discrete_sequence=px.colors.sequential.Blues)
+        fig.update_layout(width=800,height=600,showlegend=True,
+                          legend=dict(orientation="h",yanchor="bottom",y=-0.2,
+                                      xanchor="center",x=0.5))
+        st.plotly_chart(fig,use_container_width=True)
+        st.dataframe(gpu_data.style.format({"Percentage":"{:.2f}%"}),use_container_width=True)
         st.markdown("#### GPU Rentals")
-
-        for gpu in gpu_counts:
-            if gpu == OTHER_GPU_LABEL:
-                continue  # 🚫 Skip "Other GPUs" in progress bars
-
-            total_count = gpu_counts[gpu]
-            rented_count = rented_gpu_counts.get(gpu, 0)
-            rented_percentage = rented_count / total_count if total_count > 0 else 0
-
-            st.text(f"{gpu}: {rented_count}/{total_count} GPUs rented")
-            st.progress(rented_percentage)  # Progress bar showing allocation status
+        for g in gpu_counts:
+            if g==OTHER_GPU_LABEL: continue
+            tot = gpu_counts[g]; ren = rented_gpu.get(g,0)
+            pct = ren/tot if tot else 0
+            st.text(f"{g}: {ren}/{tot} rented")
+            st.progress(pct)
 
 def search():
     """Search Tool for Hotkeys"""
@@ -470,7 +364,7 @@ def search():
             col, _ = st.columns([1, 1])  # Use only the first column (50% width)
 
             # 🚨 **Handle Missing GPU Data Case**
-            if not hardware_info or "stats" not in hardware_info or not hardware_info.get("stats", {}).get("gpu_specs"):
+            if not hardware_info or "stats" not in hardware_info or not hardware_info.get("stats", {}).get("gpu_name"):
                 col.error("⚠️ This hotkey is registered but inactive. It did not pass Proof-of-GPU (PoG) verification.")
                 return  # Stop execution to avoid further errors
 
@@ -479,15 +373,16 @@ def search():
             stats = hardware_info.get("stats", {})
             details = hardware_info.get("details", {})
 
-            gpu_specs = stats.get("gpu_specs", {})
+            gpu_name = stats.get("gpu_name", "N/A")
+            gpu_num = stats.get("gpu_num", 0)
             cpu_specs = details.get("cpu", {})
             gpu_miner = details.get("gpu", {})
             ram_specs = details.get("ram", {})
             disk_specs = details.get("hard_disk", {})
 
             hardware_table = {
-                "GPU Name": gpu_specs.get("gpu_name", "N/A"),
-                "GPU Count": gpu_specs.get("num_gpus", 0),
+                "GPU Name": gpu_name,
+                "GPU Count": gpu_num,
                 "Total GPU Capacity (GiB)": gpu_miner.get("capacity", 0) / 1024 if gpu_miner.get("capacity") else "N/A",
                 "CPU Count": cpu_specs.get("count", "N/A"),
                 "RAM Available (GiB)": ram_specs.get("available", 0) / (1024.0**3),
@@ -529,7 +424,7 @@ def search():
             # ✅ **Display Scoring Metrics**
             col.subheader("Scoring Metrics")
             scoring_metrics = {
-                "PoG Status": "Pass" if gpu_specs else "Fail",
+                "PoG Status": "Pass" if gpu_name not in (None, "", "N/A") else "Fail",
                 "Penalized": "Yes" if hotkey_input in penalized_keys else "No",
                 "Rented (Allocated)": "Yes" if hotkey_input in allocated_keys else "No",
                 "Performance Score": stats.get("score", "N/A"),
@@ -548,27 +443,13 @@ def search():
 
 def benchmark():
     st.title("Benchmark Tool")
-    st.write("Run PoG benchmarking tests for nodes and compute resources:")
-
-    # Path to your ZIP file (make sure it's in the same directory or adjust the path)
-    zip_file_path = "Data/PoG_Benchmark.zip"
-
-    # Read the ZIP file as bytes
+    st.write("Download PoG benchmark files:")
     try:
-        with open(zip_file_path, "rb") as zip_file:
-            zip_data = zip_file.read()
+        data = open("Data/PoG_Benchmark.zip","rb").read()
+        st.download_button("Download ZIP",data,"PoG_Benchmark.zip","application/zip")
+    except Exception:
+        st.error("ZIP not found.")
 
-        # Provide a download button
-        st.download_button(
-            label="Download the PoG Benachmark Files (Validator & Miner)",
-            data=zip_data,
-            file_name="PoG_Benchmark.zip",
-            mime="application/zip"
-        )
-    except FileNotFoundError:
-        st.error(f"Could not find the file '{zip_file_path}'. Please ensure it exists.")
-
-    # Expected benchmark result (formatted as code)
     benchmark_output = """\
 [Step 1] Establishing SSH connection to the miner...
 [Step 1] Sending miner script and requesting remote hash.
@@ -617,148 +498,272 @@ Total time: 30.88 seconds.
     st.markdown("#### Expected Validator Output")
     st.code(benchmark_output, language="bash")  # Syntax highlighting for readability
 
-# Load Material Icons & Apply Red Styling to Icons and Links
-st.markdown(
-    """
-    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
-    <style>
-        .icon {
-            font-family: 'Material Icons';
-            font-size: 18px;
-            vertical-align: middle;
-            margin-right: 5px;
-            color: #D32F2F;  /* Red color for icons */
-        }
-        a {
-            color: #D32F2F !important;  /* Red color for links */
-            text-decoration: none;
-            font-weight: light;
-        }
-        a:hover {
-            text-decoration: underline;
-        }
-    </style>
-    """, unsafe_allow_html=True
-)
-
 def help_links():
-    """Help & Useful Links Page"""
     st.title("Help & Resources")
-    st.write("Find useful resources, documentation, and support links below.")
-
-    # Neural Dashboard & Access
-    st.subheader("Neural Dashboard & Access")
-    st.markdown(
-        """
-        - <span class="icon">dashboard</span> <a href="https://app.neuralinternet.ai/" target="_blank">Neural Dashboard App</a>
-        """, unsafe_allow_html=True
-    )
-
-    # Documentation & Support
-    st.subheader("Documentation & Support")
-    st.markdown(
-        """
-        - <span class="icon">menu_book</span> <a href="https://docs.neuralinternet.ai/ni-ecosystem/ni-compute-sn27" target="_blank">User Guide</a>
-        - <span class="icon">article</span> <a href="https://github.com/neuralinternet/ni-compute/blob/main/README.md" target="_blank">Readme</a>
-        """, unsafe_allow_html=True
-    )
-
-    # Community & External Resources
-    st.subheader("Community & External Resources")
-    st.markdown(
-        """
-        - <span class="icon">public</span> <a href="https://neuralinternet.ai/" target="_blank">Official Website</a>
-        - <span class="icon">code</span> <a href="https://github.com/neuralinternet/ni-compute" target="_blank">GitHub Repository</a>
-        - <span class="icon">chat</span> <a href="https://discord.com/channels/799672011265015819/1174835090539433994" target="_blank">Discord Community</a>
-        - <span class="icon">campaign</span> <a href="https://x.com/neural_internet" target="_blank">X/Twitter Updates</a>
-        """, unsafe_allow_html=True
-    )
-
-    # Performance & Monitoring Tools
-    st.subheader("Performance & Monitoring Tools")
-    st.markdown(
-        """
-        - <span class="icon">bar_chart</span> <a href="https://wandb.ai/neuralinternet/opencompute/runs/0djlnjjs/overview" target="_blank">WandB - Validator</a>
-        - <span class="icon">insights</span> <a href="https://taostats.io/subnets/27/chart" target="_blank">Taostats (SN27)</a>
-        """, unsafe_allow_html=True
-    )
+    st.subheader("Neural Dashboard")
+    st.markdown('- <span class="icon">dashboard</span> <a href="https://app.neuralinternet.ai/" target="_blank">Dashboard</a>',unsafe_allow_html=True)
+    st.subheader("Docs")
+    st.markdown('- <span class="icon">menu_book</span> <a href="https://docs.neuralinternet.ai/" target="_blank">User Guide</a>\n- <span class="icon">article</span> <a href="https://github.com/neuralinternet/ni-compute" target="_blank">GitHub</a>',unsafe_allow_html=True)
+    st.subheader("Community")
+    st.markdown('- <span class="icon">public</span> <a href="https://neuralinternet.ai/" target="_blank">Website</a>\n- <span class="icon">chat</span> <a href="https://discord.com/" target="_blank">Discord</a>\n- <span class="icon">campaign</span> <a href="https://x.com/neural_internet" target="_blank">X/Twitter</a>',unsafe_allow_html=True)
+    st.subheader("Monitoring")
+    st.markdown('- <span class="icon">bar_chart</span> <a href="https://wandb.ai/neuralinternet/opencompute" target="_blank">WandB</a>\n- <span class="icon">insights</span> <a href="https://taostats.io/subnets/27" target="_blank">Taostats</a>',unsafe_allow_html=True)
 
 def chat():
-    """Neural Internet Chat Support (Now Powered by ChatGPT)"""
     st.title("Chat Support")
-    
     st.markdown("---")
+    st.write("Ask common questions:")
+    st.markdown('- <span class="icon">help</span> **What is NI?**\n- <span class="icon">computer</span> **How to mine?**\n- <span class="icon">warning</span> **Why no emissions?**\n- <span class="icon">check_circle</span> **Check miner health**',unsafe_allow_html=True)
+    st.link_button("Open Chat", "https://chatgpt.com/g/...", type="secondary", icon=":material/chat:")
 
-    st.write("The Neural Internet ChatGPT assistant can help answer common questions like:")
+def config_page():
+    # Only show to logged-in admins
+    if not st.session_state.authenticated:
+        st.stop()
 
-    st.markdown(
-        """
-        - <span class="icon">help</span> **What is Neural Internet?**
-        - <span class="icon">computer</span> **How do I mine on NI Compute?**
-        - <span class="icon">warning</span> **Why is my miner not receiving emissions?**
-        - <span class="icon">check_circle</span> **How do I check if my miner is running properly?**
-        """,
-        unsafe_allow_html=True,
-    )
+    st.title("Configuration")
 
-    # Button to ChatGPT-powered Neural Internet chat
-    chat_link = "https://chatgpt.com/g/g-67cf2506b6f88191a4400819f6963378-neural-internet"
-    st.link_button("Open Neural Internet Chat", chat_link, type="secondary", icon=":material/chat:")
+    # Fetch the entire config.yaml from the server
+    resp = get_data_from_server("config")
+    cfg  = resp.get("config", {})
+    sc   = cfg.get("subnet_config", {})
+    gp   = cfg.get("gpu_performance", {})
+    tm   = cfg.get("gpu_time_models", {})
+    mp   = cfg.get("merkle_proof", {})
 
-    st.markdown("---")
+    ### ── Subnet Configuration ────────────────────────────────
+    with st.expander("Subnet Configuration", expanded=True):
+        with st.form("subnet_form"):
+            # Fetch all hotkeys for the multiselect
+            all_keys = get_data_from_server("keys").get("keys", [])
+            if not all_keys:
+                # fallback to metagraph hotkeys
+                mg = get_data_from_server("metagraph").get("metagraph", {})
+                all_keys = mg.get("hotkeys", [])
 
-# Organizing Pages into Sections
+            col1, col2 = st.columns(2)
+            # Left: GPU weights
+            with col1:
+                st.write("**GPU Weights**")
+                new_gpu_weights = {}
+                for gpu, wt in sc.get("gpu_weights", {}).items():
+                    new_gpu_weights[gpu] = st.slider(
+                        label=gpu,
+                        min_value=0.0, max_value=100.0,
+                        value=float(wt), step=0.1,
+                        help="Relative priority weight"
+                    )
+
+            # Right: general subnet parameters + sybil list
+            with col2:
+                st.write("**General Subnet Parameters**")
+                total_em     = st.number_input(
+                    "Total Miner Emission",
+                    min_value=0.0, max_value=1.0,
+                    value=float(sc.get("total_miner_emission", 0.05)),
+                    step=0.01
+                )
+                blocks_epoch = st.number_input(
+                    "Blocks per Epoch",
+                    min_value=1, max_value=100_000,
+                    value=int(sc.get("blocks_per_epoch", 360)),
+                    step=1
+                )
+                max_chg      = st.number_input(
+                    "Max Challenge Blocks",
+                    min_value=1, max_value=1000,
+                    value=int(sc.get("max_challenge_blocks", 11)),
+                    step=1
+                )
+                rand_delay   = st.number_input(
+                    "Rand Delay Blocks Max",
+                    min_value=0, max_value=1000,
+                    value=int(sc.get("rand_delay_blocks_max", 5)),
+                    step=1
+                )
+                allow_sybil  = st.checkbox(
+                    "Allow Fake Sybil Slot",
+                    value=bool(sc.get("allow_fake_sybil_slot", True))
+                )
+
+                st.markdown("**Sybil-check Eligible Hotkeys**")
+                existing_sybil = sc.get("sybil_check_eligible_hotkeys", [])
+                new_sybil = st.multiselect(
+                    "Select hotkeys eligible for Sybil check",
+                    options=all_keys,
+                    default=existing_sybil
+                )
+
+            submitted1 = st.form_submit_button("Save Subnet Configuration")
+            msg1       = st.empty()
+            if submitted1:
+                cfg["subnet_config"] = {
+                    "total_miner_emission":       total_em,
+                    "blocks_per_epoch":           blocks_epoch,
+                    "max_challenge_blocks":       max_chg,
+                    "rand_delay_blocks_max":      rand_delay,
+                    "allow_fake_sybil_slot":      allow_sybil,
+                    "sybil_check_eligible_hotkeys": new_sybil,
+                    "gpu_weights":                new_gpu_weights
+                }
+                r = requests.put(
+                    f"{SERVER_URL}/config",
+                    json=cfg,
+                    headers={"X-Admin-Key": ADMIN_KEY},
+                    timeout=10
+                )
+                if r.status_code == 200:
+                    msg1.success("✅ Subnet configuration updated")
+                else:
+                    msg1.error(f"❌ Subnet update failed (status {r.status_code})")
+
+    ### ── PoG - GPU Performance ────────────────────────────────
+    with st.expander("PoG - GPU Performance", expanded=False):
+        gp16 = gp.get("GPU_TFLOPS_FP16", {})
+        gp32 = gp.get("GPU_TFLOPS_FP32", {})
+        av   = gp.get("GPU_AVRAM", {})
+        scs  = gp.get("gpu_scores", {})
+
+        with st.form("perf_form"):
+            # header
+            c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
+            c1.write("**GPU Name**"); c2.write("**FP16**"); c3.write("**FP32**"); c4.write("**VRAM**"); c5.write("**Score**")
+
+            new_perf = {}
+            for gpu in gp16:
+                v16 = float(gp16.get(gpu, 0.0))
+                v32 = float(gp32.get(gpu, 0.0))
+                vr  = float(av.get(gpu,    0.0))
+                ss  = float(scs.get(gpu,   0.0))
+
+                c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
+                c1.write(gpu)
+                f16 = c2.number_input(f"{gpu}_fp16", value=v16, format="%.2f", label_visibility="collapsed")
+                f32 = c3.number_input(f"{gpu}_fp32", value=v32, format="%.2f", label_visibility="collapsed")
+                vrb = c4.number_input(f"{gpu}_vram", value=vr, format="%.2f", label_visibility="collapsed")
+                scr = c5.number_input(f"{gpu}_score", value=ss, format="%.2f", label_visibility="collapsed")
+                new_perf[gpu] = {"fp16": f16, "fp32": f32, "vram": vrb, "score": scr}
+
+            submitted2 = st.form_submit_button("Save GPU Performance")
+            msg2       = st.empty()
+            if submitted2:
+                cfg["gpu_performance"] = {
+                    "GPU_TFLOPS_FP16": { g: new_perf[g]["fp16"] for g in new_perf },
+                    "GPU_TFLOPS_FP32": { g: new_perf[g]["fp32"] for g in new_perf },
+                    "GPU_AVRAM":        { g: new_perf[g]["vram"] for g in new_perf },
+                    "gpu_scores":       { g: new_perf[g]["score"] for g in new_perf }
+                }
+                r2 = requests.put(
+                    f"{SERVER_URL}/config",
+                    json=cfg,
+                    headers={"X-Admin-Key": ADMIN_KEY},
+                    timeout=10
+                )
+                if r2.status_code == 200:
+                    msg2.success("✅ GPU performance updated")
+                else:
+                    msg2.error(f"❌ GPU performance update failed (status {r2.status_code})")
+
+    ### ── PoG - Quadratic GPU Timing Models ───────────────────
+    with st.expander("PoG - Quadratic GPU Timing Models", expanded=False):
+        with st.form("timing_form"):
+            c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
+            c1.write("**GPU Name**"); c2.write("**a0**"); c3.write("**a1**"); c4.write("**a2**"); c5.write("**tol**")
+            new_tm = {}
+            for gpu, params in tm.items():
+                a0 = float(params.get("a0", 0.0))
+                a1 = float(params.get("a1", 0.0))
+                a2 = float(params.get("a2", 0.0))
+                tl = float(params.get("tol", 1.0))
+
+                c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
+                c1.write(gpu)
+                na0 = c2.number_input(f"{gpu}_a0", value=a0, format="%.2f", label_visibility="collapsed")
+                na1 = c3.number_input(f"{gpu}_a1", value=a1, format="%.2f", label_visibility="collapsed")
+                na2 = c4.number_input(f"{gpu}_a2", value=a2, format="%.2f", label_visibility="collapsed")
+                ntl = c5.number_input(f"{gpu}_tol", value=tl, format="%.2f", label_visibility="collapsed")
+                new_tm[gpu] = {"a0": na0, "a1": na1, "a2": na2, "tol": ntl}
+
+            submitted3 = st.form_submit_button("Save GPU Timing Models")
+            msg3       = st.empty()
+            if submitted3:
+                cfg["gpu_time_models"] = new_tm
+                r3 = requests.put(
+                    f"{SERVER_URL}/config",
+                    json=cfg,
+                    headers={"X-Admin-Key": ADMIN_KEY},
+                    timeout=10
+                )
+                if r3.status_code == 200:
+                    msg3.success("✅ GPU timing models updated")
+                else:
+                    msg3.error(f"❌ GPU timing models update failed (status {r3.status_code})")
+
+    ### ── PoG - Merkle Proof Settings ────────────────────────
+    with st.expander("PoG - Merkle Proof Settings", expanded=False):
+        with st.form("merkle_form"):
+            col1, col2 = st.columns(2)
+            miner_path  = col1.text_input("Miner Script Path", value=mp.get("miner_script_path", ""))
+            hash_algo   = col1.text_input("Hash Algorithm", value=mp.get("hash_algorithm", ""))
+            pog_spots   = col1.number_input("Spots per GPU", min_value=1, max_value=100, value=int(mp.get("spot_per_gpu", 3)))
+            retry_int   = col1.number_input("PoG Retry Interval (s)", min_value=1, max_value=3600, value=int(mp.get("pog_retry_interval", 60)))
+
+            time_tol    = col2.number_input("Time Tolerance (s)", min_value=0, max_value=300, value=int(mp.get("time_tolerance", 5)))
+            submat      = col2.number_input("Submatrix Size", min_value=1, max_value=10_000, value=int(mp.get("submatrix_size", 512)))
+            buf_factor  = col2.number_input("Buffer Factor", min_value=0.0, max_value=1.0, value=float(mp.get("buffer_factor", 0.45)), format="%.2f")
+            retry_lim   = col2.number_input("PoG Retry Limit", min_value=1, max_value=100, value=int(mp.get("pog_retry_limit", 20)))
+            max_workers = col2.number_input("Max Workers", min_value=1, max_value=1024, value=int(mp.get("max_workers", 64)))
+            max_delay   = col2.number_input("Max Random Delay (s)", min_value=0, max_value=3600, value=int(mp.get("max_random_delay", 600)))
+
+            submitted4 = st.form_submit_button("Save Merkle Settings")
+            msg4       = st.empty()
+            if submitted4:
+                cfg["merkle_proof"] = {
+                    "miner_script_path":  miner_path,
+                    "hash_algorithm":     hash_algo,
+                    "time_tolerance":     time_tol,
+                    "submatrix_size":     submat,
+                    "buffer_factor":      buf_factor,
+                    "spot_per_gpu":       pog_spots,
+                    "pog_retry_limit":    retry_lim,
+                    "pog_retry_interval": retry_int,
+                    "max_workers":        max_workers,
+                    "max_random_delay":   max_delay
+                }
+                r4 = requests.put(
+                    f"{SERVER_URL}/config",
+                    json=cfg,
+                    headers={"X-Admin-Key": ADMIN_KEY},
+                    timeout=10
+                )
+                if r4.status_code == 200:
+                    msg4.success("✅ Merkle proof settings updated")
+                else:
+                    msg4.error(f"❌ Merkle settings update failed (status {r4.status_code})")
+
+# ───────────────────── NAVIGATION ─────────────────────────────
 network_pages = [
-    st.Page(dashboard, title="Dashboard", icon=":material/dashboard:"),
-    st.Page(metagraph, title="Metagraph", icon=":material/hub:"),
-    st.Page(stats, title="Stats", icon=":material/insights:")
+    st.Page(dashboard,   title="Dashboard", icon=":material/dashboard:"),
+    st.Page(metagraph,   title="Metagraph", icon=":material/hub:"),
+    st.Page(stats,       title="Stats",     icon=":material/insights:")
 ]
-
 tool_pages = [
-    st.Page(search, title="Search", icon=":material/search:"),
-    st.Page(benchmark, title="Benchmark", icon=":material/speed:"),  
+    st.Page(search,      title="Search",    icon=":material/search:"),
+    st.Page(benchmark,   title="Benchmark", icon=":material/speed:")
 ]
-
 help_pages = [
-    st.Page(help_links, title="Links & Docs", icon=":material/help:"),
-    st.Page(chat, title="Chat", icon=":material/chat:") 
-        ]
+    st.Page(help_links,  title="Links & Docs", icon=":material/help:"),
+    st.Page(chat,        title="Chat",         icon=":material/chat:")
+]
+if st.session_state.authenticated:
+    help_pages.append(st.Page(config_page, title="Config", icon=":material/settings:"))
 
-# Apply navigation
-pg = st.navigation(
-    {
-        "Network Overview": network_pages,
-        "Tools": tool_pages,
-        "Resources": help_pages
-    },
-    position="sidebar"
-)
+pages = {
+    "Network Overview": network_pages,
+    "Tools": tool_pages,
+    "Resources": help_pages
+}
 
-# --- About Section (Minimalist & Professional) ---
-# Apply navigation
-pg = st.navigation(
-    {
-        "Network Overview": network_pages,
-        "Tools": tool_pages,
-        "Resources": help_pages
-    },
-    position="sidebar"
-)
-
-# --- About Section (Minimalist & Informative) ---
-#with st.sidebar.expander("About", expanded=False):
-st.sidebar.info(
-    """ 
-    **Neural Internet Compute**  
-    A decentralized AI computing network for high-performance compute resource sharing.  
-
-    **Key Features:**  
-    - AI & ML optimized GPU computing  
-    - Secure, decentralized validation  
-    - Blockchain-based incentives  
-    - Open-source and community-driven   
-    """,
-)
-
-# Run the selected page
+pg = st.navigation(pages, position="sidebar")
+#st.sidebar.info("**Neural Internet Compute**  \nDecentralized, high-performance GPU sharing.")
 pg.run()

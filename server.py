@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from typing import Dict, List, Any
 import bittensor as bt
 import wandb
@@ -11,6 +11,7 @@ from bittensor.core.metagraph import Metagraph
 from bittensor.core.subtensor import Subtensor
 import argparse
 import json
+import yaml
 import httpx
 import copy
 import random
@@ -21,6 +22,7 @@ app = FastAPI()
 # Load environment variables
 load_dotenv()
 api_key = os.getenv("WANDB_API_KEY")
+ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 
 # Constants for W&B
 PUBLIC_WANDB_NAME = "opencompute"
@@ -128,7 +130,7 @@ def interpolate_details(
 
     return new_data
 
-def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
+def _fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
     """
     1) Pull all W&B runs once (project path).
        - store hotkey -> specs in 'wandb_hotkey_map'.
@@ -250,6 +252,64 @@ def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
 
     return db_specs_dict
 
+def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
+    """
+    Pull W&B runs for miners and map their specs to hotkeys.
+    If a UID's hotkey has a run, use its details.
+    Otherwise, leave details as {}.
+    """
+    global stats
+    db_specs_dict: Dict[int, Dict[str, Any]] = {}
+    project_path = f"{PUBLIC_WANDB_ENTITY}/{PUBLIC_WANDB_NAME}"
+
+    # --- 1) Build hotkey -> specs map from W&B
+    wandb_hotkey_map: Dict[str, Dict[str, Any]] = {}
+    try:
+        runs = api.runs(project_path)
+        for run in runs:
+            run_config = getattr(run, 'config', None)
+            if not run_config or not isinstance(run_config, dict):
+                continue
+            if run_config.get("role") != "miner":
+                continue
+
+            details = run_config.get("specs")
+            if not isinstance(details, dict):
+                continue
+
+            run_hotkey = run_config.get("hotkey")
+            if isinstance(run_hotkey, str):
+                wandb_hotkey_map[run_hotkey] = details
+    except Exception as e:
+        print(f"An error occurred while fetching runs from wandb: {e}")
+
+    # --- 2) For each UID, use details if hotkey exists in W&B
+    for uid, stat_data in stats.items():
+        if not isinstance(stat_data, dict):
+            db_specs_dict[uid] = {
+                "hotkey": None,
+                "details": {},
+                "stats": stat_data
+            }
+            print(f"UID={uid} | hotkey=None")
+            continue
+
+        st_hotkey = stat_data.get("hotkey")
+        if isinstance(st_hotkey, str) and st_hotkey in wandb_hotkey_map:
+            final_details = copy.deepcopy(wandb_hotkey_map[st_hotkey])
+        else:
+            final_details = {}
+
+        db_specs_dict[uid] = {
+            "hotkey": st_hotkey,
+            "details": final_details,
+            "stats": stat_data
+        }
+
+        print(f"UID={uid} | hotkey={st_hotkey}")
+
+    return db_specs_dict
+
 def get_allocated_hotkeys(api, run_path: str) -> List[str]:
     """
     Fetch allocated hotkeys from a validator run 
@@ -302,16 +362,13 @@ def get_metagraph():
     return metagraph
 
 def get_subnet_alpha_price():
-    subtensor = bt.subtensor(network="finney")
-    
-    # Fetch subnet information directly without metagraph
-    subnet_info = subtensor.subnet(27)
-
-    # Get the current alpha price (τ/α) and emission rate (α/block)
-    alpha_price = subnet_info.price
-    alpha_emission = subnet_info.emission
-
-    return alpha_price, alpha_emission
+    try:
+        subtensor = bt.subtensor(network="finney")
+        subnet_info = subtensor.subnet(27)
+        return subnet_info.price, subnet_info.emission
+    except Exception as e:
+        print(f"Error fetching subnet info: {e}")
+        return None, None
 
 async def fetch_tao_price():
     """Fetches the latest TAO price from CoinGecko asynchronously."""
@@ -323,7 +380,7 @@ async def fetch_tao_price():
             if response.status_code == 200:
                 data = response.json()
                 price_cache["tao_price"] = data["bittensor"]["usd"]
-                print(f"✅ Updated TAO/USD Price: ${price_cache['tao_price']}")
+                #print(f"✅ Updated TAO/USD Price: ${price_cache['tao_price']}")
             else:
                 print(f"⚠️ Failed to fetch TAO price: {response.status_code}")
     except Exception as e:
@@ -337,8 +394,8 @@ async def sync_data_periodically():
      3) Fetches miner specs 
      4) Fetches allocated & penalized hotkeys
     """
-    validator_run_path = "neuralinternet/opencompute/8etd9d95"  # Example
-    validator_run_path2 = "neuralinternet/opencompute/0djlnjjs"  # Example
+    validator_run_path = "neuralinternet/opencompute/0djlnjjs"  # Example
+    validator_run_path2 = "neuralinternet/opencompute/ckig4h3x"  # Example
 
     global metagraph_cache, hardware_specs_cache, allocated_hotkeys_cache, penalized_hotkeys_cache, stats, subnet_cache, price_cache
 
@@ -382,20 +439,22 @@ async def sync_data_periodically():
             }
 
             alpha_price, alpha_emission = get_subnet_alpha_price()
-            print(f"Alpha Price (τ/α): {alpha_price}")
-            print(f"Alpha Emission (α/block): {alpha_emission}")
-
-            subnet_cache = {
-                "alpha_price": alpha_price,
-                "alpha_emission": alpha_emission,
-            }
+            if alpha_price is not None and alpha_emission is not None:
+                subnet_cache = {
+                    "alpha_price": float(alpha_price),
+                    "alpha_emission": float(alpha_emission),
+                }
+                #print(f"Alpha Price (τ/α): {alpha_price}")
+                #print(f"Alpha Emission (α/block): {alpha_emission}")
+            else:
+                subnet_cache = {}
             
             # 2) Load validator stats (executor again, but for CPU-bound or blocking I/O calls)
             new_stats = await loop.run_in_executor(
                 executor,
                 fetch_validator_stats,
                 api,
-                validator_run_path
+                validator_run_path2
             )
             stats = new_stats
 
@@ -415,7 +474,7 @@ async def sync_data_periodically():
                 executor,
                 get_allocated_hotkeys,
                 api,
-                validator_run_path2
+                validator_run_path
             )
             allocated_hotkeys_cache = allocated
 
@@ -479,6 +538,33 @@ async def get_metagraph_data() -> Dict[str, Any]:
 async def get_tao_price() -> Dict[str, Any]:
     """API Endpoint to get the latest TAO/USD price."""
     return {"tao_price": price_cache.get("tao_price", "N/A")}
+
+@app.get("/config")
+async def get_config() -> Dict[str, Any]:
+    """
+    Returns the entire contents of config.yaml for display/editing.
+    """
+    try:
+        with open("config.yaml", "r") as f:
+            cfg = yaml.safe_load(f)
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="config.yaml not found")
+    return {"config": cfg}
+
+@app.put("/config")
+async def update_config(
+    payload: Dict[str, Any],
+    x_admin_key: str = Header(None)
+) -> Dict[str, Any]:
+    if x_admin_key != ADMIN_KEY or not ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        with open("config.yaml", "w") as f:
+            # disable key-sorting to preserve your original order
+            yaml.safe_dump(payload, f, sort_keys=False)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
+    return {"status": "ok"}
 
 # To run the server:
 # uvicorn server:app --reload --host 0.0.0.0 --port 8316

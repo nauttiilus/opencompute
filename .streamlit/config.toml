@@ -8,7 +8,7 @@ showErrorDetails = false
 # The preset Streamlit theme that your custom theme inherits from. One of "light" or "dark".
 # base ="light"
 # Primary accent for interactive elements
-primaryColor = '#D32F2F'
+primaryColor = '#3075D4'
 # Background color for the main content area
 backgroundColor = '#0F1013'
 # Background color for sidebar and most interactive widgets
