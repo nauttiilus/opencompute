@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import base64
 import plotly.graph_objects as go  # type: ignore
 import plotly.express as px        # type: ignore
+import plotly.colors as pc
 
 # ────────────────────────── ENV & GLOBALS ────────────────────────────
 load_dotenv()
@@ -281,7 +282,7 @@ SUPPORTED_GPUS = {
 
 OTHER_GPU_LABEL = "Other GPUs"
 
-def stats():
+def _stats():
     st.title("Network Statistics")
     with st.spinner("Loading..."):
         alloc = get_data_from_server("allocated_keys").get("allocated_keys", [])
@@ -325,6 +326,120 @@ def stats():
             pct = ren/tot if tot else 0
             st.text(f"{g}: {ren}/{tot} rented")
             st.progress(pct)
+
+def stats():
+    st.title("Network Statistics")
+    with st.spinner("Loading..."):
+        alloc = get_data_from_server("allocated_keys").get("allocated_keys", [])
+        specs = get_data_from_server("specs").get("specs", {})
+        cfg   = get_data_from_server("config").get("config", {})
+    if not cfg:
+        st.error("No config available."); return
+
+    # ── GPU Count Distribution (from network) ──
+    gpu_counts = {}
+    rented_gpu = {}
+    total = 0
+    for itm in specs.values():
+        sd = itm.get("stats", {}) or {}
+        name = sd.get("gpu_name", "Unknown GPU")
+        raw_cnt = sd.get("gpu_num")
+        cnt = int(raw_cnt) if isinstance(raw_cnt, (int, float)) else 0
+        status = "Res." if itm.get("hotkey", "") in alloc else "Avail."
+        lbl = SUPPORTED_GPUS.get(name, OTHER_GPU_LABEL)
+        gpu_counts[lbl] = gpu_counts.get(lbl, 0) + cnt
+        total += cnt
+        if status == "Res.":
+            rented_gpu[lbl] = rented_gpu.get(lbl, 0) + cnt
+
+    gpu_data = pd.DataFrame([
+        {"GPU Model": g, "Count": c,
+         "Rented": rented_gpu.get(g, 0),
+         "Percentage": (c / total * 100) if total else 0}
+        for g, c in gpu_counts.items()
+    ]).sort_values("Count", ascending=False)
+
+    # ── GPU Weights from Config ONLY ──
+    gpu_weights_cfg = (cfg.get("subnet_config", {}) or {}).get("gpu_weights", {})
+    total_miner_emission = float((cfg.get("subnet_config", {}) or {}).get("total_miner_emission", 0.0))
+
+    total_weight = sum(gpu_weights_cfg.values())
+    if total_weight == 0:
+        total_weight = 1  # avoid div by zero
+
+    # Map raw GPU names from config to display labels
+    weight_rows = []
+    for raw_name, w in gpu_weights_cfg.items():
+        label = SUPPORTED_GPUS.get(raw_name, raw_name)  # fallback to raw if not mapped
+        weight_pct = (w / total_weight * 100)
+        emission_pct = (w / total_weight * total_miner_emission * 100)
+        weight_rows.append({
+            "GPU Model": label,
+            "Weight %": weight_pct,
+            "Emission %": emission_pct
+        })
+
+    weight_df = pd.DataFrame(weight_rows).sort_values("Weight %", ascending=False)
+
+    # ── Dynamic blue color scale ──
+    num_gpus = len(weight_df)
+    if num_gpus <= len(px.colors.sequential.Blues):
+        color_seq = px.colors.sequential.Blues[:num_gpus]
+    else:
+        color_seq = pc.sample_colorscale("Blues", [i/(num_gpus-1) for i in range(num_gpus)])
+
+    # ── Layout: now config pie is Column 1 ──
+    c1, c2 = st.columns([1.5, 1.5])
+
+    def reversed_blue_scale(num_items):
+        if num_items <= len(px.colors.sequential.Blues):
+            seq = px.colors.sequential.Blues[:num_items]
+        else:
+            seq = px.colors.sample_colorscale(
+                px.colors.sequential.Blues,
+                [i / (num_items - 1) for i in range(num_items)]
+            )
+        return list(reversed(seq))  # darkest first
+
+    # Left column → GPU Weight & Emission (from config)
+    with c1:
+        st.markdown("#### GPU Emission Share Distribution")
+        color_seq_config = reversed_blue_scale(len(weight_df))
+        fig1 = px.pie(weight_df, names="GPU Model", values="Weight %",
+                        color_discrete_sequence=color_seq_config)
+        fig1.update_layout(width=800, height=600, showlegend=True,
+                           legend=dict(orientation="h", yanchor="bottom", y=-0.2,
+                                       xanchor="center", x=0.5))
+        st.plotly_chart(fig1, use_container_width=True)
+        st.dataframe(weight_df.style.format({
+            "Weight %": "{:.2f}%",
+            "Emission %": "{:.2f}%"
+        }), use_container_width=True)
+
+    # Right column → GPU Count Distribution
+    with c2:
+        st.markdown("#### GPU Live Distribution (Count)")
+        if not gpu_data.empty:
+            color_seq_network = reversed_blue_scale(len(gpu_data))
+            fig2 = px.pie(gpu_data, names="GPU Model", values="Count",
+                        color_discrete_sequence=color_seq_network)
+            fig2.update_layout(width=800, height=600, showlegend=True,
+                               legend=dict(orientation="h", yanchor="bottom", y=-0.2,
+                                           xanchor="center", x=0.5))
+            st.plotly_chart(fig2, use_container_width=True)
+            st.dataframe(gpu_data.style.format({"Percentage": "{:.2f}%"}),
+                         use_container_width=True)
+            st.markdown("#### GPU Rentals")
+            for g in gpu_counts:
+                if g == OTHER_GPU_LABEL:
+                    continue
+                tot = gpu_counts[g]
+                ren = rented_gpu.get(g, 0)
+                pct = ren / tot if tot else 0
+                st.text(f"{g}: {ren}/{tot} rented")
+                st.progress(pct)
+        else:
+            st.info("No GPU count data available.")
 
 def search():
     """Search Tool for Hotkeys"""
