@@ -282,51 +282,6 @@ SUPPORTED_GPUS = {
 
 OTHER_GPU_LABEL = "Other GPUs"
 
-def _stats():
-    st.title("Network Statistics")
-    with st.spinner("Loading..."):
-        alloc = get_data_from_server("allocated_keys").get("allocated_keys", [])
-        specs = get_data_from_server("specs").get("specs", {})
-    if not specs:
-        st.error("No data available."); return
-    gpu_counts = {}
-    rented_gpu = {}
-    total = 0
-    for itm in specs.values():
-        sd = itm.get("stats",{}) or {}
-        name = sd.get("gpu_name","Unknown GPU")
-        raw_cnt = sd.get("gpu_num")
-        cnt = int(raw_cnt) if isinstance(raw_cnt, (int, float)) else 0
-        status = "Res." if itm.get("hotkey","") in alloc else "Avail."
-        lbl = SUPPORTED_GPUS.get(name, OTHER_GPU_LABEL)
-        gpu_counts[lbl] = gpu_counts.get(lbl,0)+cnt
-        total += cnt
-        if status=="Res.":
-            rented_gpu[lbl] = rented_gpu.get(lbl,0)+cnt
-    gpu_data = pd.DataFrame([
-        {"GPU Model":g, "Count":c,
-         "Rented":rented_gpu.get(g,0),
-         "Percentage":(c/total*100) if total else 0}
-        for g,c in gpu_counts.items()
-    ]).sort_values("Count",ascending=False)
-    c1, c2 = st.columns([1.5,2])
-    with c1:
-        st.markdown("#### GPU Distribution")
-        fig = px.pie(gpu_data,names="GPU Model",values="Count",
-                     color_discrete_sequence=px.colors.sequential.Blues)
-        fig.update_layout(width=800,height=600,showlegend=True,
-                          legend=dict(orientation="h",yanchor="bottom",y=-0.2,
-                                      xanchor="center",x=0.5))
-        st.plotly_chart(fig,use_container_width=True)
-        st.dataframe(gpu_data.style.format({"Percentage":"{:.2f}%"}),use_container_width=True)
-        st.markdown("#### GPU Rentals")
-        for g in gpu_counts:
-            if g==OTHER_GPU_LABEL: continue
-            tot = gpu_counts[g]; ren = rented_gpu.get(g,0)
-            pct = ren/tot if tot else 0
-            st.text(f"{g}: {ren}/{tot} rented")
-            st.progress(pct)
-
 def stats():
     st.title("Network Statistics")
     with st.spinner("Loading..."):
@@ -408,7 +363,7 @@ def stats():
         fig1 = px.pie(weight_df, names="GPU Model", values="Weight %",
                         color_discrete_sequence=color_seq_config)
         fig1.update_layout(width=800, height=600, showlegend=True,
-                           legend=dict(orientation="h", yanchor="bottom", y=-0.2,
+                           legend=dict(orientation="h", yanchor="bottom", y=-0.4,
                                        xanchor="center", x=0.5))
         st.plotly_chart(fig1, use_container_width=True)
         st.dataframe(weight_df.style.format({
@@ -424,7 +379,7 @@ def stats():
             fig2 = px.pie(gpu_data, names="GPU Model", values="Count",
                         color_discrete_sequence=color_seq_network)
             fig2.update_layout(width=800, height=600, showlegend=True,
-                               legend=dict(orientation="h", yanchor="bottom", y=-0.2,
+                               legend=dict(orientation="h", yanchor="bottom", y=-0.4,
                                            xanchor="center", x=0.5))
             st.plotly_chart(fig2, use_container_width=True)
             st.dataframe(gpu_data.style.format({"Percentage": "{:.2f}%"}),
