@@ -363,7 +363,7 @@ def stats():
         fig1 = px.pie(weight_df, names="GPU Model", values="Weight %",
                         color_discrete_sequence=color_seq_config)
         fig1.update_layout(width=800, height=600, showlegend=True,
-                           legend=dict(orientation="h", yanchor="bottom", y=-0.4,
+                           legend=dict(orientation="h", yanchor="bottom", y=-0.5,
                                        xanchor="center", x=0.5))
         st.plotly_chart(fig1, use_container_width=True)
         st.dataframe(weight_df.style.format({
@@ -379,7 +379,7 @@ def stats():
             fig2 = px.pie(gpu_data, names="GPU Model", values="Count",
                         color_discrete_sequence=color_seq_network)
             fig2.update_layout(width=800, height=600, showlegend=True,
-                               legend=dict(orientation="h", yanchor="bottom", y=-0.4,
+                               legend=dict(orientation="h", yanchor="bottom", y=-0.5,
                                            xanchor="center", x=0.5))
             st.plotly_chart(fig2, use_container_width=True)
             st.dataframe(gpu_data.style.format({"Percentage": "{:.2f}%"}),
