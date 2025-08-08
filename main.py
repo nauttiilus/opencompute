@@ -336,32 +336,17 @@ def stats():
 
     weight_df = pd.DataFrame(weight_rows).sort_values("Weight %", ascending=False)
 
-    # ── Dynamic blue color scale ──
-    num_gpus = len(weight_df)
-    if num_gpus <= len(px.colors.sequential.Blues):
-        color_seq = px.colors.sequential.Blues[:num_gpus]
-    else:
-        color_seq = pc.sample_colorscale("Blues", [i/(num_gpus-1) for i in range(num_gpus)])
+    # ── Use distinct qualitative colors ──
+    distinct_colors = px.colors.qualitative.Set3
 
     # ── Layout: now config pie is Column 1 ──
     c1, c2 = st.columns([1.5, 1.5])
 
-    def reversed_blue_scale(num_items):
-        if num_items <= len(px.colors.sequential.Blues):
-            seq = px.colors.sequential.Blues[:num_items]
-        else:
-            seq = px.colors.sample_colorscale(
-                px.colors.sequential.Blues,
-                [i / (num_items - 1) for i in range(num_items)]
-            )
-        return list(reversed(seq))  # darkest first
-
     # Left column → GPU Weight & Emission (from config)
     with c1:
         st.markdown("#### GPU Emission Share Distribution")
-        color_seq_config = reversed_blue_scale(len(weight_df))
         fig1 = px.pie(weight_df, names="GPU Model", values="Weight %",
-                        color_discrete_sequence=color_seq_config)
+                        color_discrete_sequence=distinct_colors)
         fig1.update_layout(width=800, height=600, showlegend=True,
                            legend=dict(orientation="h", yanchor="bottom", y=-0.5,
                                        xanchor="center", x=0.5))
@@ -375,9 +360,8 @@ def stats():
     with c2:
         st.markdown("#### GPU Live Distribution (Count)")
         if not gpu_data.empty:
-            color_seq_network = reversed_blue_scale(len(gpu_data))
             fig2 = px.pie(gpu_data, names="GPU Model", values="Count",
-                        color_discrete_sequence=color_seq_network)
+                        color_discrete_sequence=distinct_colors)
             fig2.update_layout(width=800, height=600, showlegend=True,
                                legend=dict(orientation="h", yanchor="bottom", y=-0.5,
                                            xanchor="center", x=0.5))
