@@ -406,7 +406,7 @@ async def sync_data_periodically():
         try:
             loop = asyncio.get_running_loop()
 
-            api.flush()
+            await loop.run_in_executor(executor, api.flush)
 
             # 1) Metagraph sync. Because it's synchronous, we do it in a thread executor.
             print("[DEBUG] Starting metagraph sync in background task ...")
@@ -414,31 +414,35 @@ async def sync_data_periodically():
             print("[DEBUG] Metagraph is up-to-date.")
 
             # 2) Store all metagraph details in cache
-            metagraph_cache = {
-                "version": metagraph.version.tolist(),
-                "n": metagraph.n.tolist(),
-                "block": metagraph.block.tolist(),
-                "stake": metagraph.S.tolist(),
-                "total_stake": metagraph.total_stake.tolist(),
-                "ranks": metagraph.R.tolist(),
-                "trust": metagraph.T.tolist(),
-                "consensus": metagraph.C.tolist(),
-                "validator_trust": metagraph.validator_trust.tolist(),
-                "incentive": metagraph.I.tolist(),
-                "emission": metagraph.E.tolist(),
-                "dividends": metagraph.D.tolist(),
-                "active": metagraph.active.tolist(),
-                "last_update": metagraph.last_update.tolist(),
-                "validator_permit": metagraph.validator_permit.tolist(),
-                "weights": metagraph.weights.tolist(),
-                "bonds": metagraph.bonds.tolist(),
-                "uids": metagraph.uids.tolist(),
-                "hotkeys": metagraph.hotkeys,  # Ensure deep copy for thread safety
-                "axons": [axon for axon in metagraph.axons],
-                #"neurons": [neuron.to_dict() for neuron in metagraph.neurons]
-            }
+            def build_metagraph_cache(m):
+                return {
+                    "version": m.version.tolist(),
+                    "n": m.n.tolist(),
+                    "block": m.block.tolist(),
+                    "stake": m.S.tolist(),
+                    "total_stake": m.total_stake.tolist(),
+                    "ranks": m.R.tolist(),
+                    "trust": m.T.tolist(),
+                    "consensus": m.C.tolist(),
+                    "validator_trust": m.validator_trust.tolist(),
+                    "incentive": m.I.tolist(),
+                    "emission": m.E.tolist(),
+                    "dividends": m.D.tolist(),
+                    "active": m.active.tolist(),
+                    "last_update": m.last_update.tolist(),
+                    "validator_permit": m.validator_permit.tolist(),
+                    "weights": m.weights.tolist(),
+                    "bonds": m.bonds.tolist(),
+                    "uids": m.uids.tolist(),
+                    "hotkeys": list(m.hotkeys),
+                    "axons": [axon for axon in m.axons],
+                }
 
-            alpha_price, alpha_emission = get_subnet_alpha_price()
+            metagraph_cache = await loop.run_in_executor(executor, build_metagraph_cache, metagraph)
+
+            alpha_price, alpha_emission = await loop.run_in_executor(executor, get_subnet_alpha_price)
+            await loop.run_in_executor(executor, api.flush)
+
             if alpha_price is not None and alpha_emission is not None:
                 subnet_cache = {
                     "alpha_price": float(alpha_price),

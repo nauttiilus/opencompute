@@ -115,7 +115,7 @@ gpu_time_models:
   NVIDIA RTX 6000 Ada Generation:     {a0: 13.63, a1: 0.21, a2:  0.12, tol: 1.30}
   NVIDIA L40S:                        {a0:  9.58, a1: 5.61, a2: -0.35, tol: 1.30}
   NVIDIA A100-SXM4-80GB:              {a0: 31.32, a1: 1.80, a2:  0.22, tol: 1.30}
-  NVIDIA H100 PCIe:                   {a0: 12.28, a1:11.48, a2: -0.60, tol: 1.30}
+  NVIDIA H100 PCIe:                   {a0: 12.28, a1: 11.48, a2: -0.60, tol: 1.30}
   NVIDIA H100 80GB HBM3:              {a0: 19.00, a1: 1.43, a2:  0.16, tol: 1.30}
   NVIDIA H200:                        {a0: 32.55, a1: 5.28, a2: -0.23, tol: 1.30}
   NVIDIA B200:                        {a0: 18.03, a1: 3.84, a2:  0.02, tol: 1.30}
