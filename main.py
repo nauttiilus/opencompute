@@ -5,6 +5,7 @@ import pandas as pd
 import requests
 import matplotlib.pyplot as plt
 import base64
+import json, requests, threading
 import plotly.graph_objects as go  # type: ignore
 import plotly.express as px        # type: ignore
 import plotly.colors as pc
@@ -32,7 +33,12 @@ def get_config(key, default=None):
     return default
 
 # Config values
-ADMIN_PASSWORD = get_config("ADMIN_PASSWORD", "")
+NI_ADMIN_USERNAME = get_config("NI_ADMIN_USERNAME", "ni-admin")
+NI_ADMIN_PASSWORD = get_config("NI_ADMIN_PASSWORD", "")
+NI_MASTER_USERNAME = get_config("NI_MASTER_USERNAME", "ni-master")
+NI_MASTER_PASSWORD = get_config("NI_MASTER_PASSWORD", "")
+
+ADMIN_PASSWORD = get_config("ADMIN_PASSWORD", "")  # kept for compatibility (unused in new auth flow)
 ADMIN_KEY      = get_config("ADMIN_KEY", "")
 SERVER_IP      = get_config("SERVER_IP", "65.108.33.88")
 SERVER_PORT    = get_config("SERVER_PORT", "8000")
@@ -76,40 +82,58 @@ st.logo("Neural_Internet_White_crop.png", size="large")
 # ───────────────────────── SERVER CALL ────────────────────────
 def get_data_from_server(endpoint: str):
     try:
-        r = requests.get(f"{SERVER_URL}/{endpoint}", timeout=5)
+        r = requests.get(f"{SERVER_URL}/{endpoint}", timeout=15)
         r.raise_for_status()
         return r.json() or {}
     except Exception as e:
         st.error(f"Error fetching {endpoint}: {e}")
         return {}
 
-# ─────────────────────── SIDEBAR LOGIN (no button) ────────────────────────
+# ─────────────────────── SIDEBAR LOGIN (username + password) ────────────────────────
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
+if "role" not in st.session_state:
+    st.session_state.role = None  # "admin" | "master" | None
 
 def _login_cb():
     """Called when the user presses Enter in the password box."""
-    if st.session_state.get("admin_pwd", "") == ADMIN_PASSWORD:
+    user = st.session_state.get("admin_user", "").strip()
+    pwd  = st.session_state.get("admin_pwd", "")
+
+    # Master has full access
+    if user == NI_MASTER_USERNAME and pwd == NI_MASTER_PASSWORD:
         st.session_state.authenticated = True
+        st.session_state.role = "master"
+    # Admin has rentals + benchmark mainnet
+    elif user == NI_ADMIN_USERNAME and pwd == NI_ADMIN_PASSWORD:
+        st.session_state.authenticated = True
+        st.session_state.role = "admin"
     else:
-        st.sidebar.error("❌ Invalid password")
+        st.session_state.authenticated = False
+        st.session_state.role = None
+        st.sidebar.error("❌ Invalid username or password")
 
 with st.sidebar:
     if not st.session_state.authenticated:
-        # on_change fires when they hit Enter
+        # username first, then password; pressing Enter in password triggers login
+        st.markdown("##### Admin Login")  # smaller heading (H5 size)
+        st.text_input("Username", key="admin_user")
         st.text_input(
-            "Admin Login",
+            "Password",
             type="password",
             key="admin_pwd",
             on_change=_login_cb
         )
     else:
+        st.caption(f"Logged in as **{st.session_state.role}**")
         if st.button("Logout"):
             # 1) log them out
             st.session_state.authenticated = False
-            # 2) clear the saved password so the box is empty on next show
-            if "admin_pwd" in st.session_state:
-                del st.session_state["admin_pwd"]
+            st.session_state.role = None
+            # 2) clear the saved creds so the boxes are empty on next show
+            for k in ("admin_pwd", "admin_user"):
+                if k in st.session_state:
+                    del st.session_state[k]
             # 3) rerun so the login box immediately pops back
             st.rerun()
 
@@ -342,7 +366,7 @@ def stats():
     # ── Layout: now config pie is Column 1 ──
     c1, c2 = st.columns([1.5, 1.5])
 
-    # Left column → GPU Weight & Emission (from config)
+    # Left column → GPU Weight & Emission (from config) + Rentals
     with c1:
         st.markdown("#### GPU Emission Share Distribution")
         fig1 = px.pie(weight_df, names="GPU Model", values="Weight %",
@@ -356,6 +380,20 @@ def stats():
             "Emission %": "{:.2f}%"
         }), use_container_width=True)
 
+        # GPU Rentals moved here
+        if not gpu_data.empty:
+            st.markdown("#### GPU Rentals")
+            for g in gpu_counts:
+                if g == OTHER_GPU_LABEL:
+                    continue
+                tot = gpu_counts[g]
+                ren = rented_gpu.get(g, 0)
+                pct = ren / tot if tot else 0
+                st.text(f"{g}: {ren}/{tot} rented")
+                st.progress(pct)
+        else:
+            st.info("No GPU count data available.")
+
     # Right column → GPU Count Distribution
     with c2:
         st.markdown("#### GPU Live Distribution (Count)")
@@ -368,15 +406,6 @@ def stats():
             st.plotly_chart(fig2, use_container_width=True)
             st.dataframe(gpu_data.style.format({"Percentage": "{:.2f}%"}),
                          use_container_width=True)
-            st.markdown("#### GPU Rentals")
-            for g in gpu_counts:
-                if g == OTHER_GPU_LABEL:
-                    continue
-                tot = gpu_counts[g]
-                ren = rented_gpu.get(g, 0)
-                pct = ren / tot if tot else 0
-                st.text(f"{g}: {ren}/{tot} rented")
-                st.progress(pct)
         else:
             st.info("No GPU count data available.")
 
@@ -497,60 +526,290 @@ def search():
 
 def benchmark():
     st.title("Benchmark Tool")
-    st.write("Download PoG benchmark files:")
-    try:
-        data = open("Data/PoG_Benchmark.zip","rb").read()
-        st.download_button("Download ZIP",data,"PoG_Benchmark.zip","application/zip")
-    except Exception:
-        st.error("ZIP not found.")
 
-    benchmark_output = """\
-[Step 1] Establishing SSH connection to the miner...
-[Step 1] Sending miner script and requesting remote hash.
-[Integrity Check] SUCCESS: Local and remote hashes match.
+    st.markdown(
+        "This tool runs a controlled benchmark on a selected miner hotkey to verify GPU performance, "
+        "integrity, and configuration in a process closely aligned with the network’s validation routine."
+    )
 
-[Step 2] Executing benchmarking mode on the miner...
-[Step 2] Benchmarking completed.
-[Benchmark Results] Detected 4 GPU(s) with 34.36 GB unfractured VRAM.
-                    FP16 - Matrix Size: 92672, Execution Time: 3.099146 s
-                    FP32 - Matrix Size: 46336, Execution Time: 3.778708 s
-[Performance Metrics] Calculated TFLOPS:
-                    FP16: 513.61 TFLOPS
-                    FP32: 52.66 TFLOPS
-[GPU Identification] Based on performance: NVIDIA H100 80GB HBM3
+    # ── session flags ─────────────────────────────────────────────
+    if "bench_running" not in st.session_state:
+        st.session_state.bench_running = False
+    if "bench_hotkey" not in st.session_state:
+        st.session_state.bench_hotkey = None
+    if "bench_network" not in st.session_state:
+        st.session_state.bench_network = "Testnet"
 
-[Step 3] Initiating Merkle Proof Mode.
-[Step 3] Compute mode executed on miner - Matrix Size: 20704
-         Compute mode execution time: 9.99 seconds.
-[Merkle Proof] Root hashes received from GPUs:
-        GPU 0: d8a28e819e5225d4fe1e6313b361edb32d96309ed069ca0bef78afe40faea236
-        GPU 1: 89dd17f81441cf595219afbb80681945ee12aed2ecc13130380bdd75892d056d
-        GPU 3: e267818f0186721ed2f23458d8414420a6f1c08862381563b58ffe0c6a70e1fe
-        GPU 2: 4e0037c4bd23b36772015c50a47e21c95b6a60b5cc38666598fc4f6750c0c6c5
-Average Matrix Multiplication Time: 0.7565 seconds
-Average Merkle Tree Time: 1.2923 seconds
-[Merkle Proof] Proof mode executed on miner.
-[Merkle Proof] Responses received from miner.
-[Verification] GPU 0 passed verification.
-[Verification] GPU 1 passed verification.
-[Verification] GPU 3 passed verification.
-[Verification] GPU 2 passed verification.
-[Verification] SUCCESS: 4 out of 4 GPUs passed verification.
+    # Allow admin or master to operate (including Mainnet). Others disabled.
+    disabled_flag = (st.session_state.role not in ("admin", "master")) or st.session_state.bench_running
 
-==================================================
-[Verification] SUCCESS
-  Merkle Proof: PASSED
-  GPU Identification: Detected 4 x NVIDIA H100 80GB HBM3 GPU(s)
-==================================================
-Score: 37.5/100
-Total time: 30.88 seconds.
-    """
+    net_cols = st.columns([1, 3])
+    with net_cols[0]:
+        st.radio(
+            "Network",
+            ["Testnet", "Mainnet"],
+            key="bench_network",   # bind directly to session_state
+            horizontal=True,
+            help="Choose which metagraph to list hotkeys from (only available for admins).",
+            disabled=disabled_flag,
+        )
+
+        # Warning directly BELOW the radio when Mainnet is selected
+        if st.session_state.bench_network == "Mainnet":
+            st.warning(
+                "Executing the benchmark tool for hotkeys on **Mainnet** may interfere with the "
+                "**validation routine** and reduce miner performance if run frequently. "
+                "Use sparingly and only when necessary.",
+                icon="⚠️",
+            )
+
+    # ── load metagraph depending on selected network ─────────────
+    meta_endpoint = "metagraph" if st.session_state.bench_network == "Mainnet" else "metagraph_test"
+    meta = get_data_from_server(meta_endpoint).get("metagraph", {})
+    hotkeys = meta.get("hotkeys", [])
+
+    # ── controls (Start button disabled while running) ───────────
+    hotkey = st.selectbox("Target hotkey", hotkeys)
+    start = st.button("Start Benchmark", type="primary", disabled=st.session_state.bench_running or (st.session_state.role not in ("admin", "master")))
 
     st.markdown("---")
 
-    # Display the benchmark output as a code block
-    st.markdown("#### Expected Validator Output")
-    st.code(benchmark_output, language="bash")  # Syntax highlighting for readability
+    console = st.empty()
+    status_box = st.empty()   # placeholder; cleared at end
+    spinner_ph = st.empty()
+
+    # ---------- kick off ----------
+    if start:
+        if not hotkey:
+            st.error("Please select a hotkey first.")
+            return
+        st.session_state.bench_running = True
+        st.session_state.bench_hotkey = hotkey
+        st.rerun()
+
+    # ---------- active run ----------
+    if st.session_state.bench_running:
+        hotkey = st.session_state.bench_hotkey
+
+        # spinner immediately
+        spinner_ph.markdown("""
+<div style="display:flex;align-items:center;gap:10px;padding:8px 0;">
+  <div style="
+    width:18px;height:18px;border:3px solid rgba(0,0,0,0.1);
+    border-top-color:#1976D2;border-radius:50%;
+    animation:spin 0.8s linear infinite;"></div>
+  <div><strong>Preparing benchmark…</strong></div>
+</div>
+<style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+        """, unsafe_allow_html=True)
+
+        # 1) start job
+        try:
+            resp = requests.post(
+                f"{SERVER_URL}/benchmark/start",
+                json={"hotkey": hotkey, "network": st.session_state.bench_network},
+                headers={"X-Admin-Key": ADMIN_KEY},
+                timeout=15
+            )
+            resp.raise_for_status()
+            job_id = resp.json().get("job_id")
+        except Exception as e:
+            spinner_ph.empty()
+            st.session_state.bench_running = False
+            st.error(f"Failed to start benchmark: {e}")
+            st.rerun()
+
+        # 2) stream logs (SSE)
+        log_text = ""
+        first_event_seen = False
+        error_seen = False
+        last_error_msg = None
+        end_status = None  # "done" | "error" | "cancelled"
+
+        try:
+            with requests.get(f"{SERVER_URL}/benchmark/stream/{job_id}", stream=True, timeout=900) as r:
+                r.raise_for_status()
+
+                buffer_event, buffer_data = None, None
+
+                for raw in r.iter_lines(decode_unicode=True):
+                    if raw is None:
+                        continue
+                    raw = raw.strip()
+
+                    if not raw:
+                        # dispatch a complete event
+                        if buffer_event is not None and buffer_data is not None:
+                            # first SSE event → update spinner text
+                            if not first_event_seen:
+                                first_event_seen = True
+                                spinner_ph.markdown("""
+<div style="display:flex;align-items:center;gap:10px;padding:8px 0;">
+  <div style="
+    width:18px;height:18px;border:3px solid rgba(0,0,0,0.1);
+    border-top-color:#1976D2;border-radius:50%;
+    animation:spin 0.8s linear infinite;"></div>
+  <div><strong>Benchmark in progress – live logs</strong></div>
+</div>
+<style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+                                """, unsafe_allow_html=True)
+
+                            if buffer_event == "message":
+                                try:
+                                    evt = json.loads(buffer_data)
+                                    lvl = evt.get("level", "info")
+                                    msg = evt.get("message", "")
+                                    payload = evt.get("payload")
+
+                                    # classify
+                                    if lvl == "error":
+                                        error_seen = True
+                                        last_error_msg = msg or "Unknown error"
+
+                                    prefix = {"success": "[OK]", "error": "[ERR]", "warning": "[WARN]"}.get(lvl, "[..]")
+                                    line = f"{prefix} {msg}"
+
+                                    # compact payload preview
+                                    if isinstance(payload, dict) and payload:
+                                        interesting = (
+                                            # general / IDs
+                                            "hotkey", "uid", "wandb_active",
+
+                                            # GPU identity
+                                            "num_gpus", "gpu_count", "gpu_names", "reported_name", "identified_gpu",
+
+                                            # benchmark metrics
+                                            "vram", "size_fp16", "time_fp16", "size_fp32", "time_fp32",
+                                            "fp16_tflops", "fp32_tflops",
+
+                                            # PoG/merkle
+                                            "n", "roots", "avg_gemm", "avg_gemm_s", "timing_ok", "bench_times",
+
+                                            # W&B hardware specs
+                                            "gpu", "cpu", "ram_GiB", "disk_free_GiB", "run_path"
+                                        )
+                                        compact = {k: payload[k] for k in interesting if k in payload}
+                                        if "reported_name" not in compact and "gpu_names" in payload:
+                                            try:
+                                                if isinstance(payload["gpu_names"], list) and payload["gpu_names"]:
+                                                    compact["reported_name"] = payload["gpu_names"][0]
+                                            except Exception:
+                                                pass
+                                        if compact:
+                                            line += "\n" + "`" + json.dumps(compact, ensure_ascii=False) + "`"
+
+                                except Exception:
+                                    line = buffer_data
+
+                                log_text += ("\n" if log_text else "") + line
+                                console.code(log_text, language="bash")
+
+                            elif buffer_event == "end":
+                                try:
+                                    end_payload = json.loads(buffer_data)
+                                    end_status = end_payload.get("status")
+                                except Exception:
+                                    end_status = None
+                                break
+
+                            elif buffer_event == "error":
+                                error_seen = True
+                                last_error_msg = (buffer_data or "").strip() or "Stream error"
+                                line = f"[ERR] {last_error_msg}"
+                                log_text += ("\n" if log_text else "") + line
+                                console.code(log_text, language="bash")
+                                break
+
+                        # reset for next event
+                        buffer_event, buffer_data = None, None
+                        continue
+
+                    # accumulate sse fields
+                    if raw.startswith("event:"):
+                        buffer_event = raw[len("event:"):].strip()
+                    elif raw.startswith("data:"):
+                        data_line = raw[len("data:"):].strip()
+                        buffer_data = data_line if buffer_data is None else buffer_data + "\n" + data_line
+
+        except Exception as e:
+            spinner_ph.empty()
+            st.session_state.bench_running = False
+            st.error(f"Benchmark failed ❌\n\nStream error: {e}")
+            st.info(
+                "How to resolve:\n"
+                "- Check server health and logs.\n"
+                "- Verify ports and firewall rules.\n"
+                "- Ensure the benchmark service is running.\n"
+                "- Try again."
+            )
+            #st.rerun()
+
+        # 3) end-of-run UI
+        spinner_ph.empty()
+        status_box.empty()
+
+        if error_seen or (end_status == "error"):
+            msg = last_error_msg or "An error occurred."
+            fix = "How to resolve:\n"
+
+            lm = (msg or "").lower()
+
+            if ("cuda out of memory" in lm or
+                "torch.outofmemoryerror" in lm or
+                "out of memory" in lm):
+                fix += "- Ensure there are no other processes using the GPU; additional load is not allowed and will be detected.\n" \
+                    "- Stop any background GPU tasks (training, inference, etc.) before re-running.\n" \
+                    "- Reboot the miner if memory does not free up after stopping processes.\n" 
+
+            elif "gpu mismatch" in lm:
+                fix += "- Ensure the reported GPU matches the actual hardware performance (no spoofing).\n" \
+                    "- Stop any other GPU workloads and re-run; additional load is not allowed on this subnet.\n"
+
+            elif "no gpus detected" in lm:
+                fix += "- Verify that NVIDIA drivers and CUDA are properly installed and working.\n" \
+                    "- Confirm that the container has GPU access (e.g., run `nvidia-smi`).\n" \
+                    "- Reboot the miner if needed.\n"
+
+            elif "verification failed" in lm or "pog" in lm:
+                fix += "- Check GPU clocks and thermals to avoid instability.\n" \
+                    "- Reboot the miner and re-run the benchmark.\n"
+
+            elif "ssh" in lm or "novalidconnectionserror" in lm or "connection refused" in lm:
+                fix += "- Confirm that the SSH port (set with `ssh.port`) is open (default = 4444).\n" \
+                    "- Check network connectivity to the miner host/port.\n" \
+                    "- Ensure the container is still running and not terminated by the system after creation.\n"
+
+            elif "integrity" in lm or "hash" in lm:
+                fix += "- Ensure Docker has root access and can read/write to the `/tmp` directory.\n" \
+                    "- Do not attempt spoofing — it will be detected.\n"
+
+            elif "wandb" in lm or "w&b" in lm:
+                fix += "- Ensure the miner runs a Weights & Biases (W&B) client under [OpenCompute W&B](https://wandb.ai/neuralinternet/opencompute/) \n" \
+                    "- Verify that `WANDB_API_KEY` is set in the `.env` file.\n" \
+                    "- Confirm the run config includes `role='miner'`, the correct `hotkey`, and a valid `specs` dictionary.\n"
+
+            elif ("busy" in lm or "allocator" in lm or "declined" in lm or "hotkey" in lm or
+                  ("allocate" in lm and "tried to allocate" not in lm and "out of memory" not in lm)):
+                fix += "- Check that the axon port (set with `axon.port`) is open and reachable from the network.\n" \
+                    "- The miner may already be allocated or performing another test; wait and retry later.\n" \
+                    "- Verify allocator availability before retrying.\n"
+
+            else:
+                fix += "- Check server logs for more details.\n" \
+                    "- Verify miner health and configuration.\n" \
+                    "- Re-run the benchmark.\n"
+
+            st.error(f"Benchmark failed ❌\n\n{msg}")
+            st.info(fix)
+
+        elif end_status == "cancelled":
+            st.warning("Benchmark was cancelled by user.")
+        else:
+            st.success("Benchmark complete ✅")
+            st.info("This miner passed all checks and is expected to validate successfully on the selected network.")
+
+        # allow new runs and refresh UI (re-enable Start)
+        st.session_state.bench_running = False
 
 def help_links():
     st.title("Help & Resources")
@@ -571,8 +830,8 @@ def chat():
     st.link_button("Open Chat", "https://chatgpt.com/g/...", type="secondary", icon=":material/chat:")
 
 def config_page():
-    # Only show to logged-in admins
-    if not st.session_state.authenticated:
+    # Only show to logged-in masters
+    if st.session_state.role != "master":
         st.stop()
 
     st.title("Configuration")
@@ -701,12 +960,15 @@ def config_page():
             submitted2 = st.form_submit_button("Save GPU Performance")
             msg2       = st.empty()
             if submitted2:
-                cfg["gpu_performance"] = {
+                updated_gp = cfg.get("gpu_performance", {}).copy()
+                updated_gp.update({
                     "GPU_TFLOPS_FP16": { g: new_perf[g]["fp16"] for g in new_perf },
                     "GPU_TFLOPS_FP32": { g: new_perf[g]["fp32"] for g in new_perf },
                     "GPU_AVRAM":        { g: new_perf[g]["vram"] for g in new_perf },
-                    "gpu_scores":       { g: new_perf[g]["score"] for g in new_perf }
-                }
+                    "gpu_scores":       { g: new_perf[g]["score"] for g in new_perf },
+                })
+                cfg["gpu_performance"] = updated_gp
+
                 r2 = requests.put(
                     f"{SERVER_URL}/config",
                     json=cfg,
@@ -795,29 +1057,285 @@ def config_page():
                 else:
                     msg4.error(f"❌ Merkle settings update failed (status {r4.status_code})")
 
+
+# add next to get_data_from_server()
+def post_to_server(endpoint: str, payload: dict):
+    try:
+        r = requests.post(f"{SERVER_URL}/{endpoint}", json=payload, timeout=30)
+        r.raise_for_status()
+        return r.json() or {}
+    except Exception as e:
+        st.error(f"Error POST {endpoint}: {e}")
+        return {}
+
+
+# ---------------------- Rent Compute Page (Miner-Centric Cards) ----------------------
+def build_specs_map(specs):
+    """Build hotkey → specs map for quick lookup."""
+    specs_map = {}
+    for idx, item in specs.items():
+        hotkey = item.get("hotkey")
+        if not hotkey:
+            continue
+        det = item.get("details", {}) or {}
+        gpu_cap = (det.get("gpu", {}).get("capacity") or 0) / 1024
+        cpu_cnt = det.get("cpu", {}).get("count") or 0
+        ram_gb  = (det.get("ram", {}).get("available") or 0) / (1024**3)
+        disk_gb = (det.get("hard_disk", {}).get("free") or 0) / (1024**3)
+        specs_map[hotkey] = {
+            "vram": round(gpu_cap, 2),
+            "cpu": int(cpu_cnt),
+            "ram": round(ram_gb, 2),
+            "disk": round(disk_gb, 2),
+        }
+    return specs_map
+
+
+# ---- Single source of truth for classification + order ----
+PERFORMANCE_TABLE = {
+    "Featured GPUs": [
+        "NVIDIA B200",
+        "NVIDIA H200",
+        "NVIDIA A40",
+        "NVIDIA GeForce RTX 5090",
+    ],
+    "NVIDIA Latest Gen": [
+        "NVIDIA H100 80GB HBM3",
+        "NVIDIA H100 PCIe",
+        "NVIDIA H100 NVL",
+        "NVIDIA L40S",
+        "NVIDIA L40",
+        "NVIDIA RTX 6000 Ada Generation",
+        "NVIDIA GeForce RTX 4090",
+        "NVIDIA RTX 4000 Ada Generation",
+        "NVIDIA L4",
+    ],
+    "NVIDIA Previous Gen": [
+        "NVIDIA A100-SXM4-80GB",
+        "NVIDIA A100 80GB PCIe",
+        "NVIDIA RTX A6000",
+        "NVIDIA RTX A5000",
+        "NVIDIA RTX A4500",
+        "NVIDIA GeForce RTX 3090",
+    ],
+    "AMD": [
+        "AMD MI300X",
+    ],
+}
+
+def classify_gpu(gpu_name):
+    """Classify GPU into category defined in PERFORMANCE_TABLE."""
+    for category, models in PERFORMANCE_TABLE.items():
+        if gpu_name in models:
+            return category
+    if any(a in gpu_name for a in PERFORMANCE_TABLE.get("AMD", [])):
+        return "AMD"
+    return "Other"
+
+
+def rent_compute():
+    st.title("Rent Compute")
+    st.caption("Select from available compute instances by GPU type and generation.")
+
+    # Load data
+    with st.spinner("Fetching available miners..."):
+        data = get_data_from_server("rent/available")
+        specs_raw = get_data_from_server("specs").get("specs", {})
+        specs_map = build_specs_map(specs_raw)
+
+    groups = data.get("groups", [])
+    if not groups:
+        st.info("No rentable miners at the moment. Try again later.")
+        return
+
+    # === FILTER BAR (inline, top of page) ===
+    st.markdown("### Filters")
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        min_vram = st.slider("Min VRAM (GB)", 0, 192, 0)
+    with f2:
+        min_ram = st.slider("Min RAM (GB)", 0, 512, 0)
+    with f3:
+        min_disk = st.slider("Min Disk (GB)", 0, 2000, 0)
+    with f4:
+        reset = st.button("Reset Filters")
+
+    if reset:
+        min_vram, min_ram, min_disk = 0, 0, 0
+
+    # Category display order
+    category_order = list(PERFORMANCE_TABLE.keys())
+
+    # Collect miners into categories (flat, miner-centric)
+    catalog = {c: [] for c in category_order}
+    for grp in groups:
+        for m in grp.get("miners", []):
+            hotkey = m.get("hotkey")
+            sp = specs_map.get(hotkey, {"vram": 0, "cpu": 0, "ram": 0, "disk": 0})
+
+            # Apply filters
+            if sp["vram"] < min_vram or sp["ram"] < min_ram or sp["disk"] < min_disk:
+                continue
+
+            category = classify_gpu(m.get("gpu_name", "Unknown"))
+            if category in catalog:
+                m["_specs"] = sp
+                catalog[category].append(m)
+
+    # Render categories
+    any_displayed = False
+    for category in category_order:
+        miners = catalog.get(category, [])
+        if not miners:
+            continue
+
+        # ---- Sort miners within the category by PERFORMANCE_TABLE order ----
+        order_list = PERFORMANCE_TABLE.get(category, [])
+        rank_map = {name: idx for idx, name in enumerate(order_list)}
+        miners.sort(key=lambda mm: rank_map.get(mm.get("gpu_name", ""), len(order_list)))
+
+        any_displayed = True
+        st.subheader(f"{category} ({len(miners)} available)")
+
+        cols_per_row = 4
+        rows = (len(miners) + cols_per_row - 1) // cols_per_row
+        idx = 0
+
+        for _ in range(rows):
+            cols = st.columns(cols_per_row)
+            for col in cols:
+                if idx >= len(miners):
+                    break
+                m = miners[idx]; idx += 1
+                sp = m["_specs"]
+
+                with col.container(border=True):
+                    st.markdown(f"### {m['gpu_name']}")
+                    st.markdown(
+                        f"**VRAM**: {sp['vram']} GB  \n"
+                        f"**CPU**: {sp['cpu']} cores  \n"
+                        f"**RAM**: {sp['ram']} GB  \n"
+                        f"**Disk**: {sp['disk']} GB"
+                    )
+
+                    with st.expander("Details"):
+                        st.caption(f"UID: `{m['uid']}`")
+                        st.caption(f"Hotkey: `{m['hotkey']}`")
+                        st.caption(f"GPUs: `{m['gpu_count']}`")
+                        st.caption(f"Axon: {m['axon_ip']}:{m['axon_port']}")
+                        if m.get("reliability") is not None:
+                            st.caption(f"Reliability: {m['reliability']}")
+                        if m.get("score") is not None:
+                            st.caption(f"Score: {m['score']}")
+
+                    if st.button("Rent", key=f"rent_{m['hotkey']}", use_container_width=True):
+                        with st.spinner("Requesting rental..."):
+                            rsp = post_to_server("rent/allocate", {"hotkey": m["hotkey"]})
+                        if rsp and rsp.get("status"):
+                            st.success("✅ Rental successful.")
+                        else:
+                            st.error("❌ Rental failed.")
+
+    if not any_displayed:
+        st.warning("No miners matched your filters. Try lowering the requirements.")
+
+# ---------------------- Rentals Management Page ----------------------
+def my_rentals():
+    st.title("My Active Rentals")
+    st.caption("View and manage your currently allocated compute nodes.")
+
+    with st.spinner("Loading rentals..."):
+        rentals = get_data_from_server("rent/rentals").get("rentals", [])
+
+    if not rentals:
+        st.info("You have no active rentals.")
+        return
+
+    cols_per_row = 4
+    rows = (len(rentals) + cols_per_row - 1) // cols_per_row
+    idx = 0
+
+    for _ in range(rows):
+        cols = st.columns(cols_per_row)
+        for col in cols:
+            if idx >= len(rentals):
+                break
+            r = rentals[idx]; idx += 1
+            d = r.get("details", {})
+            gpu_name = d.get("gpu_name", "Unknown")
+            gpu_count = d.get("gpu_count", "?")
+
+            ssh = d.get("ssh", {})
+            ssh_host = ssh.get("host")
+            ssh_port = ssh.get("port", 22)
+            ssh_user = ssh.get("username", "user")
+            ssh_pass = ssh.get("password")
+
+            ssh_cmd = f"ssh -p {ssh_port} {ssh_user}@{ssh_host}"
+
+            with col.container(border=True):
+                # Card header
+                st.markdown(f"### {gpu_name}")
+                st.caption(f"{gpu_count} GPU(s) | UID {r['uid']}")
+
+                # SSH command
+                st.markdown("**SSH Command**")
+                st.code(ssh_cmd, language="bash")
+
+                # Password (if provided)
+                if ssh_pass:
+                    st.markdown("**Password**")
+                    st.code(ssh_pass, language="bash")
+
+                # Deallocate button
+                if st.button("Deallocate", key=f"dealloc_{r['hotkey']}", use_container_width=True):
+                    with st.spinner("Requesting deallocation..."):
+                        dealloc_rsp = post_to_server("rent/deallocate", {
+                            "hotkey": r["hotkey"],
+                            "public_key": r["public_key"]
+                        })
+                    if dealloc_rsp and dealloc_rsp.get("status"):
+                        st.success("✅ Deallocated successfully.")
+                    else:
+                        st.error("❌ Failed to deallocate.")
+
 # ───────────────────── NAVIGATION ─────────────────────────────
 network_pages = [
     st.Page(dashboard,   title="Dashboard", icon=":material/dashboard:"),
     st.Page(metagraph,   title="Metagraph", icon=":material/hub:"),
     st.Page(stats,       title="Stats",     icon=":material/insights:")
 ]
+
 tool_pages = [
     st.Page(search,      title="Search",    icon=":material/search:"),
     st.Page(benchmark,   title="Benchmark", icon=":material/speed:")
 ]
+
 help_pages = [
     st.Page(help_links,  title="Links & Docs", icon=":material/help:"),
     st.Page(chat,        title="Chat",         icon=":material/chat:")
 ]
-if st.session_state.authenticated:
+
+rental_pages = []
+# Admin or Master can see rentals
+if st.session_state.role in ("admin", "master"):
+    rental_pages = [
+        st.Page(rent_compute, title="Rent Compute", icon=":material/deployed_code:"),
+        st.Page(my_rentals, title="My Rentals", icon=":material/list_alt:")
+    ]
+# Only Master can see Config
+if st.session_state.role == "master":
     help_pages.append(st.Page(config_page, title="Config", icon=":material/settings:"))
 
 pages = {
     "Network Overview": network_pages,
     "Tools": tool_pages,
-    "Resources": help_pages
+    "Resources": help_pages,
 }
 
+# Only show Compute Rentals if role allows
+if rental_pages:
+    pages["Compute Rentals"] = rental_pages
+
 pg = st.navigation(pages, position="sidebar")
-#st.sidebar.info("**Neural Internet Compute**  \nDecentralized, high-performance GPU sharing.")
 pg.run()
