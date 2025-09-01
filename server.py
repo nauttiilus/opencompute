@@ -23,6 +23,8 @@ app = FastAPI()
 load_dotenv()
 api_key = os.getenv("WANDB_API_KEY")
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
+ENABLE_CONFIG_WRITE = os.getenv("ENABLE_CONFIG_WRITE", "false").strip().lower() in ("1","true","yes","on")
+
 
 # Constants for W&B
 PUBLIC_WANDB_NAME = "opencompute"
@@ -560,11 +562,12 @@ async def update_config(
     payload: Dict[str, Any],
     x_admin_key: str = Header(None)
 ) -> Dict[str, Any]:
+    if not ENABLE_CONFIG_WRITE:
+        raise HTTPException(status_code=403, detail="Config writing disabled by server policy")
     if x_admin_key != ADMIN_KEY or not ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Forbidden")
     try:
         with open("config.yaml", "w") as f:
-            # disable key-sorting to preserve your original order
             yaml.safe_dump(payload, f, sort_keys=False)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
