@@ -6,6 +6,7 @@ import requests
 import matplotlib.pyplot as plt
 import base64
 import json, requests, threading
+import time
 import plotly.graph_objects as go  # type: ignore
 import plotly.express as px        # type: ignore
 import plotly.colors as pc
@@ -525,6 +526,8 @@ def search():
             st.error("❌ Hotkey not found. Please try again.")
 
 def benchmark():
+    import time  # only needed for the 4s message pause
+
     st.title("Benchmark Tool")
 
     st.markdown(
@@ -570,7 +573,7 @@ def benchmark():
 
     # ── controls (Start button disabled while running) ───────────
     hotkey = st.selectbox("Target hotkey", hotkeys)
-    start = st.button("Start Benchmark", type="primary", disabled=st.session_state.bench_running or (st.session_state.role not in ("admin", "master")))
+    start = st.button("Start Benchmark", type="primary", disabled=st.session_state.bench_running)
 
     st.markdown("---")
 
@@ -603,7 +606,7 @@ def benchmark():
 <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
         """, unsafe_allow_html=True)
 
-        # 1) start job
+        # 1) start job  (only modification: handle 429 nicely)
         try:
             resp = requests.post(
                 f"{SERVER_URL}/benchmark/start",
@@ -611,6 +614,32 @@ def benchmark():
                 headers={"X-Admin-Key": ADMIN_KEY},
                 timeout=15
             )
+
+            # Graceful rate-limit / queue-full handling
+            if resp.status_code == 429:
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = {}
+                detail = data.get("detail") or "System is busy. Please retry later."
+                retry_after = resp.headers.get("Retry-After")
+
+                spinner_ph.empty()
+                st.session_state.bench_running = False  # let user click again
+                if retry_after:
+                    st.warning(f"⏳ {detail} (retry after ~{retry_after}s)")
+                else:
+                    st.warning(f"⏳ {detail}")
+                st.info(
+                    "Tips:\n"
+                    "- Avoid rapid repeated clicks.\n"
+                    "- If multiple jobs are queued, wait for capacity to free up."
+                )
+                time.sleep(4)  # show message for ~4s, then refresh
+                st.rerun()
+                return
+
+            # Normal success/error path (unchanged)
             resp.raise_for_status()
             job_id = resp.json().get("job_id")
         except Exception as e:

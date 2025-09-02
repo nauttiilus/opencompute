@@ -8,9 +8,11 @@ import os
 import random
 import time
 import uuid
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Header, HTTPException, Body
+from fastapi import APIRouter, Header, HTTPException, Body, Request
+from starlette.responses import JSONResponse
+from starlette import status
 from sse_starlette.sse import EventSourceResponse  # pip install sse-starlette
 import yaml
 import bittensor as bt
@@ -103,8 +105,9 @@ def _new_job() -> str:
         "cancel": asyncio.Event(),
         "started_at": time.time(),
         "hotkey": None,
-        "public_key": None,   # for dealloc
-        "network": "Testnet", # default
+        "reserved_hotkey": None,  # set at enqueue time for reliable release
+        "public_key": None,       # for dealloc
+        "network": "Testnet",     # default
     }
     return job_id
 
@@ -144,6 +147,97 @@ async def gc():
         if now - _JOBS[jid]["started_at"] > _JOB_TTL_SECONDS:
             _JOBS.pop(jid, None)
     return {"ok": True}
+
+# ───────────────────────── RATE LIMIT / QUEUE / HOTKEY RESERVATION ─────────────────────────
+from collections import deque, defaultdict
+from time import monotonic
+
+# Env-tunable knobs
+BENCH_WORKERS    = int(os.getenv("BENCH_WORKERS", "3"))        # max concurrent benchmarks
+BENCH_QUEUE_MAX  = int(os.getenv("BENCH_QUEUE_MAX", "50"))     # max pending jobs
+# simple "X/unit" syntax: e.g., "3/min", "10/min", "30/min"
+BENCH_PER_KEY    = os.getenv("BENCH_PER_KEY", "3/min")
+BENCH_PER_IP     = os.getenv("BENCH_PER_IP", "10/min")
+BENCH_GLOBAL     = os.getenv("BENCH_GLOBAL", "30/min")
+
+def _parse_limit(s: str) -> Tuple[int, float]:
+    n, per = s.strip().split("/", 1)
+    n = int(n)
+    per = per.strip().lower()
+    if per in ("s", "sec", "second", "seconds"):
+        window = 1.0
+    elif per in ("m", "min", "minute", "minutes"):
+        window = 60.0
+    elif per in ("h", "hour", "hours"):
+        window = 3600.0
+    else:
+        window = 60.0
+    return n, window
+
+_LIM_PER_KEY = _parse_limit(BENCH_PER_KEY)
+_LIM_PER_IP  = _parse_limit(BENCH_PER_IP)
+_LIM_GLOBAL  = _parse_limit(BENCH_GLOBAL)
+
+# Sliding-window deques
+_calls_per_key: Dict[str, deque[float]] = defaultdict(deque)
+_calls_per_ip:  Dict[str, deque[float]] = defaultdict(deque)
+_calls_global:  deque[float] = deque()
+
+def _rate_ok(dq: deque[float], limit: Tuple[int, float]) -> bool:
+    now = monotonic()
+    n, window = limit
+    while dq and now - dq[0] > window:
+        dq.popleft()
+    if len(dq) >= n:
+        return False
+    dq.append(now)
+    return True
+
+def _retry_after(dq: deque[float], limit: Tuple[int, float]) -> int:
+    if not dq:
+        return 1
+    now = monotonic()
+    _, window = limit
+    oldest = dq[0]
+    remaining = max(0.0, window - (now - oldest))
+    return max(1, int(remaining))
+
+# Bounded queue and worker pool
+_job_queue: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue(maxsize=BENCH_QUEUE_MAX)
+_workers_started = False
+_running_workers = 0  # simple counter
+
+# Hotkey reservation: hotkey -> job_id (queued or running)
+_busy_hotkeys: Dict[str, str] = {}
+
+async def _start_workers():
+    global _workers_started
+    if _workers_started:
+        return
+    for _ in range(BENCH_WORKERS):
+        asyncio.create_task(_queue_worker())
+    _workers_started = True
+    print(f"[BENCH][POOL] started {BENCH_WORKERS} workers; queue max={BENCH_QUEUE_MAX}")
+
+async def _queue_worker():
+    global _running_workers
+    while True:
+        job_id, hotkey, network_label = await _job_queue.get()
+        _running_workers += 1
+        try:
+            await _run_benchmark_job(job_id, hotkey, network_label)
+        finally:
+            _running_workers -= 1
+            _job_queue.task_done()
+            # Release hotkey reservation here only if the job is already finalized in _run_benchmark_job's finally.
+            # The actual release is handled in _run_benchmark_job finally to ensure dealloc runs first.
+
+def _client_ip(request: Request) -> str:
+    # Try common proxy headers, fall back to socket addr
+    xfwd = request.headers.get("x-forwarded-for")
+    if xfwd:
+        return xfwd.split(",")[0].strip()
+    return (request.client.host if request.client else "unknown")
 
 # ───────────────────────── Helpers ─────────────────────────
 def _load_config_local() -> dict:
@@ -320,12 +414,32 @@ async def _deallocate(hotkey: str, public_key: Optional[str], network_label: str
 # ───────────────────────── API ─────────────────────────
 @router.post("/start")
 async def start_benchmark(
+    request: Request,
     payload: dict = Body(...),
     x_admin_key: str = Header(None),
 ):
+    # Auth first
     if not x_admin_key or x_admin_key != os.getenv("ADMIN_KEY", ""):
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    # Lightweight rate limits (key, IP, global). These run before any heavy work/allocations.
+    ip = _client_ip(request)
+    key = x_admin_key or "anon"
+
+    # per-key
+    if not _rate_ok(_calls_per_key[key], _LIM_PER_KEY):
+        ra = _retry_after(_calls_per_key[key], _LIM_PER_KEY)
+        return JSONResponse({"detail": "Per-key rate limit exceeded"}, status_code=429, headers={"Retry-After": str(ra)})
+    # per-ip
+    if not _rate_ok(_calls_per_ip[ip], _LIM_PER_IP):
+        ra = _retry_after(_calls_per_ip[ip], _LIM_PER_IP)
+        return JSONResponse({"detail": "Per-IP rate limit exceeded"}, status_code=429, headers={"Retry-After": str(ra)})
+    # global
+    if not _rate_ok(_calls_global, _LIM_GLOBAL):
+        ra = _retry_after(_calls_global, _LIM_GLOBAL)
+        return JSONResponse({"detail": "Global rate limit exceeded"}, status_code=429, headers={"Retry-After": str(ra)})
+
+    # Validate inputs
     hotkey = payload.get("hotkey")
     if not hotkey:
         raise HTTPException(status_code=400, detail="hotkey is required")
@@ -334,11 +448,53 @@ async def start_benchmark(
     if network_label not in NETWORKS:
         raise HTTPException(status_code=400, detail="invalid network; use 'Mainnet' or 'Testnet'")
 
+    # Start worker pool if not yet running
+    await _start_workers()
+
+    # Prevent duplicate execution for the same miner hotkey (queued or running)
+    existing_job_id = _busy_hotkeys.get(hotkey)
+    if existing_job_id:
+        existing = _JOBS.get(existing_job_id, {})
+        if existing and existing.get("status") in {"created", "queued", "running"}:
+            # 409 Conflict with pointer to current job
+            return JSONResponse(
+                {
+                    "detail": "Hotkey already busy with another job",
+                    "job_id": existing_job_id,
+                    "status": existing.get("status")
+                },
+                status_code=409
+            )
+        else:
+            # stale entry; free it
+            _busy_hotkeys.pop(hotkey, None)
+
+    # Create job and enqueue (bounded queue → back-pressure).
     job_id = _new_job()
     _JOBS[job_id]["status"] = "queued"
     _JOBS[job_id]["network"] = network_label
+    _JOBS[job_id]["reserved_hotkey"] = hotkey
     print(f"[BENCH] start_benchmark called. job_id={job_id}, hotkey={hotkey}, network={network_label}")
-    asyncio.create_task(_run_benchmark_job(job_id, hotkey, network_label))
+
+    # Reserve this hotkey immediately so duplicates get rejected while in queue
+    _busy_hotkeys[hotkey] = job_id
+
+    try:
+        _job_queue.put_nowait((job_id, hotkey, network_label))
+    except asyncio.QueueFull:
+        # Rollback reservation and job record to avoid leaks
+        try:
+            if _busy_hotkeys.get(hotkey) == job_id:
+                _busy_hotkeys.pop(hotkey, None)
+        finally:
+            _JOBS.pop(job_id, None)
+        return JSONResponse(
+            {"detail": "Benchmark queue full. Try later."},
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            headers={"Retry-After": "15"}
+        )
+
+    # Return immediately with job id
     return {"job_id": job_id}
 
 @router.post("/cancel/{job_id}")
@@ -349,6 +505,22 @@ async def cancel(job_id: str):
     print(f"[BENCH] cancel requested for job_id={job_id}")
     job["cancel"].set()
     return {"status": "cancelling"}
+
+@router.get("/stats")
+async def stats():
+    queued = _job_queue.qsize()
+    running = _running_workers
+    limits = {
+        "workers": BENCH_WORKERS,
+        "queue_max": BENCH_QUEUE_MAX,
+        "per_key": BENCH_PER_KEY,
+        "per_ip": BENCH_PER_IP,
+        "global": BENCH_GLOBAL,
+    }
+    # Also show which hotkeys are reserved (ids only; avoid leaking anything sensitive)
+    busy = {hk: jid for hk, jid in _busy_hotkeys.items()
+            if _JOBS.get(jid, {}).get("status") in {"created", "queued", "running"}}
+    return {"queued": queued, "running": running, "limits": limits, "busy_hotkeys": busy}
 
 # ───────────────────────── Core runner ─────────────────────────
 async def _run_benchmark_job(job_id: str, hotkey: Optional[str], network_label: str):
@@ -530,7 +702,7 @@ async def _run_benchmark_job(job_id: str, hotkey: Optional[str], network_label: 
         _append(job_id, "success", "PoG verified.", {"avg_gemm": avg_gemm, "timing_ok": timing_ok})
         await _tick()
 
-                # 10.1) W&B active run + (Mainnet-only) specs
+        # 10.1) W&B active run + (Mainnet-only) specs
         _append(job_id, "info", "Checking W&B hardware specs / active run…")
         await _tick()
         try:
@@ -539,7 +711,6 @@ async def _run_benchmark_job(job_id: str, hotkey: Optional[str], network_label: 
             run_path = runs_map.get(job["hotkey"])
 
             if not run_path:
-                # No active run for this hotkey on the selected network
                 _append(
                     job_id, "error",
                     "No active W&B run found for this hotkey.",
@@ -590,7 +761,6 @@ async def _run_benchmark_job(job_id: str, hotkey: Optional[str], network_label: 
                             "disk_free_GiB": _gb(disk.get("free")),
                         })
 
-                # Success log (active run; plus specs if mainnet had them)
                 _append(job_id, "success", "W&B active run detected.", payload)
 
         except Exception as e:
@@ -625,7 +795,7 @@ async def _run_benchmark_job(job_id: str, hotkey: Optional[str], network_label: 
         _append(job_id, "error", f"{type(e).__name__}: {e}")
         await _tick()
     finally:
-        # Clean up
+        # Clean up SSH + dealloc first
         try:
             if ssh:
                 await _bg(ssh_close, ssh)
@@ -644,3 +814,11 @@ async def _run_benchmark_job(job_id: str, hotkey: Optional[str], network_label: 
         except Exception as e:
             _append(job_id, "error", f"Deallocation error: {e}")
             await _tick()
+        finally:
+            # Always release hotkey reservation (even if allocation failed)
+            try:
+                reserved = _JOBS[job_id].get("reserved_hotkey")
+                if reserved and _busy_hotkeys.get(reserved) == job_id:
+                    _busy_hotkeys.pop(reserved, None)
+            except Exception:
+                pass
