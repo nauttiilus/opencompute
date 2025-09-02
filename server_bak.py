@@ -6,6 +6,7 @@ import os
 from dotenv import load_dotenv
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+# Import the synchronous Metagraph class
 from bittensor.core.metagraph import Metagraph
 from bittensor.core.subtensor import Subtensor
 import argparse
@@ -14,7 +15,7 @@ import yaml
 import httpx
 import copy
 import random
-import state
+from typing import Dict, List, Any
 
 app = FastAPI()
 
@@ -22,12 +23,22 @@ app = FastAPI()
 load_dotenv()
 api_key = os.getenv("WANDB_API_KEY")
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
-ENABLE_CONFIG_WRITE = os.getenv("ENABLE_CONFIG_WRITE", "false").strip().lower() in ("1","true","yes","on")
-
 
 # Constants for W&B
 PUBLIC_WANDB_NAME = "opencompute"
 PUBLIC_WANDB_ENTITY = "neuralinternet"
+
+# Global caches
+hardware_specs_cache: Dict[int, Dict[str, Any]] = {}
+allocated_hotkeys_cache: List[str] = []
+penalized_hotkeys_cache: List[str] = []
+hotkeys_cache: List[str] = []
+metagraph_cache: Dict[str, Any] = {}
+subnet_cache: Dict[str, Any] = {}
+price_cache: Dict[str, Any] = {}
+
+# Validator stats
+stats: Dict[int, Any] = {}
 
 # Thread pool
 executor = ThreadPoolExecutor(max_workers=4)
@@ -53,46 +64,43 @@ def fetch_validator_stats(api, run_path: str) -> Dict[int, Any]:
 def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
     """
     Pull W&B runs for miners and map their specs to hotkeys.
-    Only considers runs that are currently running (state=='running').
-    If a UID's hotkey has no active run, leave details as {}.
+    If a UID's hotkey has a run, use its details.
+    Otherwise, leave details as {}.
     """
+    global stats
     db_specs_dict: Dict[int, Dict[str, Any]] = {}
     project_path = f"{PUBLIC_WANDB_ENTITY}/{PUBLIC_WANDB_NAME}"
 
-    # --- 1) Build hotkey -> specs map from W&B (only state=='running') ---
+    # --- 1) Build hotkey -> specs map from W&B
     wandb_hotkey_map: Dict[str, Dict[str, Any]] = {}
     try:
         runs = api.runs(project_path)
         for run in runs:
-            # Only accept active runs
-            if getattr(run, "state", None) != "running":
-                continue
-
-            run_config = getattr(run, "config", None)
+            run_config = getattr(run, 'config', None)
             if not run_config or not isinstance(run_config, dict):
                 continue
             if run_config.get("role") != "miner":
                 continue
 
             details = run_config.get("specs")
-            if not isinstance(details, dict) or not details:
+            if not isinstance(details, dict):
                 continue
 
             run_hotkey = run_config.get("hotkey")
-            if isinstance(run_hotkey, str) and run_hotkey:
+            if isinstance(run_hotkey, str):
                 wandb_hotkey_map[run_hotkey] = details
-
     except Exception as e:
         print(f"An error occurred while fetching runs from wandb: {e}")
 
-    # --- 2) Map to your state.stats ---
-    for uid, stat_data in state.stats.items():
+    # --- 2) For each UID, use details if hotkey exists in W&B
+    for uid, stat_data in stats.items():
         if not isinstance(stat_data, dict):
             db_specs_dict[uid] = {
                 "hotkey": None,
                 "details": {},
-                "stats": stat_data,
+                "stats": stat_data
             }
+            print(f"UID={uid} | hotkey=None")
             continue
 
         st_hotkey = stat_data.get("hotkey")
@@ -104,8 +112,10 @@ def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
         db_specs_dict[uid] = {
             "hotkey": st_hotkey,
             "details": final_details,
-            "stats": stat_data,
+            "stats": stat_data
         }
+
+        print(f"UID={uid} | hotkey={st_hotkey}")
 
     return db_specs_dict
 
@@ -143,7 +153,7 @@ def get_penalized_hotkeys_id(api, run_path: str) -> List[str]:
         run_config = run.config
         penalized_hotkeys_checklist = run_config.get('penalized_hotkeys_checklist', [])
         for entry in penalized_hotkeys_checklist:
-            hotkey = entry
+            hotkey = entry #.get('hotkey')
             if hotkey:
                 penalized_keys_list.append(hotkey)
     except Exception as e:
@@ -151,17 +161,13 @@ def get_penalized_hotkeys_id(api, run_path: str) -> List[str]:
     return penalized_keys_list
 
 def get_metagraph():
+
     subtensor = bt.subtensor(network="finney")
+    
     # Fetch and sync the metagraph for subnet 27
     metagraph = subtensor.metagraph(netuid=27)
     metagraph.sync()
-    return metagraph
 
-def get_metagraph_test():
-    subtensor = bt.subtensor(network="test")
-    # Fetch and sync the metagraph for subnet 15 on testnet
-    metagraph = subtensor.metagraph(netuid=15)
-    metagraph.sync()
     return metagraph
 
 def get_subnet_alpha_price():
@@ -176,43 +182,18 @@ def get_subnet_alpha_price():
 async def fetch_tao_price():
     """Fetches the latest TAO price from CoinGecko asynchronously."""
     url = "https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd"
+    
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, timeout=5)
             if response.status_code == 200:
                 data = response.json()
-                state.price_cache["tao_price"] = data["bittensor"]["usd"]
+                price_cache["tao_price"] = data["bittensor"]["usd"]
+                #print(f"✅ Updated TAO/USD Price: ${price_cache['tao_price']}")
             else:
                 print(f"⚠️ Failed to fetch TAO price: {response.status_code}")
     except Exception as e:
         print(f"❌ Error fetching TAO price: {e}")
-
-def fetch_active_wandb_runs(api, entity: str, project: str) -> Dict[str, str]:
-    """
-    Return a mapping of hotkey -> '<entity>/<project>/runs/<run_id>' for ACTIVE (state=='running')
-    miner runs in the given W&B project.
-    """
-    project_path = f"{entity}/{project}"
-    mapping: Dict[str, str] = {}
-    try:
-        runs = api.runs(project_path)
-        for run in runs:
-            # Only active runs
-            if getattr(run, "state", None) != "running":
-                continue
-            cfg = getattr(run, "config", None)
-            if not isinstance(cfg, dict):
-                continue
-            if cfg.get("role") != "miner":
-                continue
-            hotkey = cfg.get("hotkey")
-            if not isinstance(hotkey, str) or not hotkey:
-                continue
-            run_id = getattr(run, "id", "")
-            mapping[hotkey] = f"{project_path}/runs/{run_id}"
-    except Exception as e:
-        print(f"An error occurred while fetching active runs from wandb ({project_path}): {e}")
-    return mapping
 
 async def sync_data_periodically():
     """
@@ -225,16 +206,23 @@ async def sync_data_periodically():
     validator_run_path = "neuralinternet/opencompute/0djlnjjs"  # Example
     validator_run_path2 = "neuralinternet/opencompute/ckig4h3x"  # Example
 
+    global metagraph_cache, hardware_specs_cache, allocated_hotkeys_cache, penalized_hotkeys_cache, stats, subnet_cache, price_cache
+
+    # Create the wandb API object once
     api = wandb.Api()
 
     while True:
         try:
             loop = asyncio.get_running_loop()
+
             await loop.run_in_executor(executor, api.flush)
 
+            # 1) Metagraph sync. Because it's synchronous, we do it in a thread executor.
             print("[DEBUG] Starting metagraph sync in background task ...")
             metagraph = await loop.run_in_executor(executor, get_metagraph)
+            print("[DEBUG] Metagraph is up-to-date.")
 
+            # 2) Store all metagraph details in cache
             def build_metagraph_cache(m):
                 return {
                     "version": m.version.tolist(),
@@ -259,55 +247,31 @@ async def sync_data_periodically():
                     "axons": [axon for axon in m.axons],
                 }
 
-            state.metagraph_cache = await loop.run_in_executor(executor, build_metagraph_cache, metagraph)
-
-            metagraph_test = await loop.run_in_executor(executor, get_metagraph_test)
-
-            def build_metagraph_test_cache(m):
-                return {
-                    "version": m.version.tolist(),
-                    "n": m.n.tolist(),
-                    "block": m.block.tolist(),
-                    "stake": m.S.tolist(),
-                    "total_stake": m.total_stake.tolist(),
-                    "ranks": m.R.tolist(),
-                    "trust": m.T.tolist(),
-                    "consensus": m.C.tolist(),
-                    "validator_trust": m.validator_trust.tolist(),
-                    "incentive": m.I.tolist(),
-                    "emission": m.E.tolist(),
-                    "dividends": m.D.tolist(),
-                    "active": m.active.tolist(),
-                    "last_update": m.last_update.tolist(),
-                    "validator_permit": m.validator_permit.tolist(),
-                    "weights": m.weights.tolist(),
-                    "bonds": m.bonds.tolist(),
-                    "uids": m.uids.tolist(),
-                    "hotkeys": list(m.hotkeys),
-                    "axons": [axon for axon in m.axons],
-                }
-
-            state.metagraph_test_cache = await loop.run_in_executor(executor, build_metagraph_test_cache, metagraph_test)
+            metagraph_cache = await loop.run_in_executor(executor, build_metagraph_cache, metagraph)
 
             alpha_price, alpha_emission = await loop.run_in_executor(executor, get_subnet_alpha_price)
             await loop.run_in_executor(executor, api.flush)
 
             if alpha_price is not None and alpha_emission is not None:
-                state.subnet_cache = {
+                subnet_cache = {
                     "alpha_price": float(alpha_price),
                     "alpha_emission": float(alpha_emission),
                 }
+                #print(f"Alpha Price (τ/α): {alpha_price}")
+                #print(f"Alpha Emission (α/block): {alpha_emission}")
             else:
-                state.subnet_cache = {}
-
+                subnet_cache = {}
+            
+            # 2) Load validator stats (executor again, but for CPU-bound or blocking I/O calls)
             new_stats = await loop.run_in_executor(
                 executor,
                 fetch_validator_stats,
                 api,
                 validator_run_path2
             )
-            state.stats = new_stats
+            stats = new_stats
 
+            # 3) Load hardware specs from miners
             hotkeys = metagraph.hotkeys
             hardware_specs = await loop.run_in_executor(
                 executor,
@@ -315,99 +279,84 @@ async def sync_data_periodically():
                 api,
                 hotkeys
             )
-            state.hardware_specs_cache = hardware_specs
-            state.hotkeys_cache = hotkeys
+            hardware_specs_cache = hardware_specs
+            hotkeys_cache = hotkeys
 
-            hotkeys_test = metagraph_test.hotkeys
-            hardware_specs_test = await loop.run_in_executor(
-                executor,
-                fetch_hardware_specs,
-                api,
-                hotkeys_test
-            )
-            state.hardware_specs_test_cache = hardware_specs_test
-
+            # 4) Fetch allocated hotkeys from second validator run
             allocated = await loop.run_in_executor(
                 executor,
                 get_allocated_hotkeys,
                 api,
                 validator_run_path
             )
-            state.allocated_hotkeys_cache = allocated
+            allocated_hotkeys_cache = allocated
 
+            # 5) Fetch penalized hotkeys from first validator run
             penalized = await loop.run_in_executor(
                 executor,
                 get_penalized_hotkeys_id,
                 api,
                 validator_run_path2
             )
-            state.penalized_hotkeys_cache = penalized
-
-            main_entity = os.getenv("PUBLIC_WANDB_ENTITY", "neuralinternet")
-            main_project = os.getenv("PUBLIC_WANDB_NAME", "opencompute")
-            test_entity = os.getenv("PUBLIC_WANDB_TEST_ENTITY", os.getenv("PUBLIC_WANDB_ENTITY", "neuralinternet"))
-            test_project = os.getenv("PUBLIC_WANDB_TEST_NAME", os.getenv("PUBLIC_WANDB_NAME", "opencompute"))
-
-            active_main = await loop.run_in_executor(
-                executor, fetch_active_wandb_runs, api, main_entity, main_project
-            )
-            active_test = await loop.run_in_executor(
-                executor, fetch_active_wandb_runs, api, test_entity, test_project
-            )
-
-            state.active_wandb_runs["Mainnet"] = active_main
-            state.active_wandb_runs["Testnet"] = active_test
+            penalized_hotkeys_cache = penalized
 
             asyncio.create_task(fetch_tao_price())
 
         except Exception as e:
             print(f"An error occurred during periodic sync: {e}")
 
-        await asyncio.sleep(60)
+        # Sleep 10 minutes between syncs
+        await asyncio.sleep(300)
 
 @app.on_event("startup")
 async def startup_event():
+    # Login to wandb once at startup
     wandb.login(key=api_key)
+    # Kick off the background sync task
     asyncio.create_task(sync_data_periodically())
 
 @app.get("/keys")
 async def get_keys() -> Dict[str, List[str]]:
-    return {"keys": state.hotkeys_cache}
+
+    return {"keys": hotkeys_cache}
 
 @app.get("/specs")
 async def get_specs() -> Dict[str, Dict[int, Dict[str, Any]]]:
-    return {"specs": state.hardware_specs_cache}
+    return {"specs": hardware_specs_cache}
 
 @app.get("/allocated_keys")
 async def get_allocated_keys() -> Dict[str, List[str]]:
-    return {"allocated_keys": state.allocated_hotkeys_cache}
+    return {"allocated_keys": allocated_hotkeys_cache}
 
 @app.get("/penalized_keys")
 async def get_penalized_keys() -> Dict[str, List[str]]:
-    return {"penalized_keys": state.penalized_hotkeys_cache}
+    return {"penalized_keys": penalized_hotkeys_cache}
 
 @app.get("/subnet")
 async def get_subnet_data() -> Dict[str, Any]:
-    return {"subnet": state.subnet_cache}
+    return {"subnet": subnet_cache}
 
 @app.get("/metagraph")
 async def get_metagraph_data() -> Dict[str, Any]:
-    if not state.metagraph_cache:
+    """
+    API endpoint to fetch the latest metagraph state.
+    Returns hotkeys, stake, trust, ranks, incentive, emission, consensus, and dividends.
+    """
+    if not metagraph_cache:
         return {"error": "Metagraph data not available. Try again later."}
-    return {"metagraph": state.metagraph_cache}
 
-@app.get("/metagraph_test")
-async def get_metagraph__test_data() -> Dict[str, Any]:
-    if not state.metagraph_test_cache:
-        return {"error": "Metagraph data not available. Try again later."}
-    return {"metagraph": state.metagraph_test_cache}
+    return {"metagraph": metagraph_cache}
 
 @app.get("/price")
 async def get_tao_price() -> Dict[str, Any]:
-    return {"tao_price": state.price_cache.get("tao_price", "N/A")}
+    """API Endpoint to get the latest TAO/USD price."""
+    return {"tao_price": price_cache.get("tao_price", "N/A")}
 
 @app.get("/config")
 async def get_config() -> Dict[str, Any]:
+    """
+    Returns the entire contents of config.yaml for display/editing.
+    """
     try:
         with open("config.yaml", "r") as f:
             cfg = yaml.safe_load(f)
@@ -420,23 +369,19 @@ async def update_config(
     payload: Dict[str, Any],
     x_admin_key: str = Header(None)
 ) -> Dict[str, Any]:
-    if not ENABLE_CONFIG_WRITE:
-        raise HTTPException(status_code=403, detail="Config writing disabled by server policy")
     if x_admin_key != ADMIN_KEY or not ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Forbidden")
     try:
         with open("config.yaml", "w") as f:
+            # disable key-sorting to preserve your original order
             yaml.safe_dump(payload, f, sort_keys=False)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
     return {"status": "ok"}
 
-from routes.rental_server import router as rental_router
-app.include_router(rental_router)
 
-# server.py (where you included rental_router)
-from routes.benchmark import router as benchmark_router
-app.include_router(benchmark_router)
+#from routes.rental_server import router as rental_router
+#app.include_router(rental_router)
 
 # To run the server:
 # uvicorn server:app --reload --host 0.0.0.0 --port 8316
