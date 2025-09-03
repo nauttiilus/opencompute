@@ -300,10 +300,10 @@ SUPPORTED_GPUS = {
     "NVIDIA RTX A5000": "RTX A5000",
     "NVIDIA RTX A4500": "RTX A4500",
     "NVIDIA RTX 4000 Ada Generation": "RTX 4000 Ada",
+    "NVIDIA RTX A4000": "RTX A4000",
     "NVIDIA GeForce RTX 4090": "RTX 4090",
     "NVIDIA GeForce RTX 3090": "RTX 3090",
     "NVIDIA L4": "L4",
-    "NVIDIA RTX A4000": "RTX A4000",
 }
 
 OTHER_GPU_LABEL = "Other GPUs"
@@ -1146,6 +1146,7 @@ PERFORMANCE_TABLE = {
         "NVIDIA RTX A6000",
         "NVIDIA RTX A5000",
         "NVIDIA RTX A4500",
+        "NVIDIA RTX A4000",
         "NVIDIA GeForce RTX 3090",
     ],
     "AMD": [
