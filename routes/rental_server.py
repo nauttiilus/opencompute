@@ -95,6 +95,7 @@ GPU_LABELS = {
     "NVIDIA GeForce RTX 4090": "RTX 4090",
     "NVIDIA GeForce RTX 3090": "RTX 3090",
     "NVIDIA L4": "L4",
+    "NVIDIA RTX A4000": "RTX A4000",
 }
 OTHER_LABEL = "Other GPUs"
 
