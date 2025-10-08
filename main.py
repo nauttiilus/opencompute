@@ -897,30 +897,31 @@ def config_page():
                         help="Relative priority weight"
                     )
 
-            # Right: general subnet parameters + sybil list
+            # Right: general subnet parameters + sybil list + reliability + treasury
             with col2:
                 st.write("**General Subnet Parameters**")
                 total_em     = st.number_input(
                     "Total Miner Emission",
                     min_value=0.0, max_value=1.0,
                     value=float(sc.get("total_miner_emission", 0.05)),
-                    step=0.01
+                    step=0.01,
+                    help="Fraction of total emission that goes to miners (0..1)."
                 )
                 blocks_epoch = st.number_input(
                     "Blocks per Epoch",
-                    min_value=1, max_value=100_000,
+                    min_value=1, max_value=1000,
                     value=int(sc.get("blocks_per_epoch", 360)),
                     step=1
                 )
                 max_chg      = st.number_input(
                     "Max Challenge Blocks",
-                    min_value=1, max_value=1000,
+                    min_value=1, max_value=25,
                     value=int(sc.get("max_challenge_blocks", 11)),
                     step=1
                 )
                 rand_delay   = st.number_input(
                     "Rand Delay Blocks Max",
-                    min_value=0, max_value=1000,
+                    min_value=0, max_value=10,
                     value=int(sc.get("rand_delay_blocks_max", 5)),
                     step=1
                 )
@@ -929,12 +930,36 @@ def config_page():
                     value=bool(sc.get("allow_fake_sybil_slot", True))
                 )
 
-                st.markdown("**Sybil-check Eligible Hotkeys**")
                 existing_sybil = sc.get("sybil_check_eligible_hotkeys", [])
                 new_sybil = st.multiselect(
                     "Select hotkeys eligible for Sybil check",
                     options=all_keys,
                     default=existing_sybil
+                )
+
+                reliability_weight = st.number_input(
+                    "Reliability Weight",
+                    min_value=0.0, max_value=1.0,
+                    value=float(sc.get("reliability_weight", 0.5)),
+                    step=0.05,
+                    help="Blend between no effect (0.0) and full effect (1.0) when applying reliability to scores."
+                )
+
+                treasury_wallet_hotkey = st.selectbox(
+                    "Treasury Wallet Hotkey",
+                    options=[""] + all_keys,
+                    index=([""] + all_keys).index(sc.get("treasury_wallet_hotkey", ""))
+                        if sc.get("treasury_wallet_hotkey", "") in ([""] + all_keys) else 0,
+                    help="Select the wallet hotkey to receive the treasury allocation. Leave empty to disable."
+                )
+
+                treasury_emission_share = st.number_input(
+                    "Treasury Emission Share",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=float(sc.get("treasury_emission_share", 0.5)),
+                    step=0.01,
+                    help="Fraction of the total emission allocated to the treasury (0–1)."
                 )
 
             submitted1 = st.form_submit_button("Save Subnet Configuration")
@@ -947,7 +972,10 @@ def config_page():
                     "rand_delay_blocks_max":      rand_delay,
                     "allow_fake_sybil_slot":      allow_sybil,
                     "sybil_check_eligible_hotkeys": new_sybil,
-                    "gpu_weights":                new_gpu_weights
+                    "gpu_weights":                new_gpu_weights,
+                    "reliability_weight":       reliability_weight,
+                    "treasury_wallet_hotkey":   treasury_wallet_hotkey,
+                    "treasury_emission_share":  treasury_emission_share,
                 }
                 r = requests.put(
                     f"{SERVER_URL}/config",
