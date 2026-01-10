@@ -263,7 +263,7 @@ async def allocate_miner(req: AllocateRequest = Body(...)) -> Dict[str, Any]:
         "gpu":       {"count": 1, "capacity": 0, "type": ""},
         "hard_disk": {"capacity": 1_073_741_824},
         "ram":       {"capacity": 1_073_741_824},
-        "testing":   True,
+        "testing":   False,
     }
     docker_requirement = {
         "base_image": req.docker_image or "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime"
