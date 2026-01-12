@@ -386,6 +386,10 @@ async def sync_sqlite_fast():
     """
     Fast background task (5s interval) for SQLite stats only.
     Provides near-instant PoG status updates when running on same instance as validator.
+
+    IMPORTANT: This MERGES SQLite data into existing state.stats (from WandB).
+    SQLite only has miners that passed PoG validation, WandB has ALL miners.
+    We need both: WandB for hardware specs, SQLite for fast PoG status updates.
     """
     import time
     last_log_time = 0
@@ -404,10 +408,19 @@ async def sync_sqlite_fast():
             else:
                 loop = asyncio.get_running_loop()
 
-                # Fast refresh of stats from SQLite
+                # Fast refresh of stats from SQLite - MERGE into existing state.stats
                 sqlite_stats = await loop.run_in_executor(executor, fetch_stats_from_sqlite, SN27_DB_PATH)
-                if sqlite_stats:  # Only update if we got valid data (non-empty)
-                    state.stats = sqlite_stats
+                if sqlite_stats:
+                    # MERGE: Update existing entries with SQLite data, keep WandB entries for non-validated miners
+                    current_stats = state.stats.copy() if state.stats else {}
+                    for uid, sqlite_data in sqlite_stats.items():
+                        if uid in current_stats and isinstance(current_stats[uid], dict):
+                            # Merge SQLite fields into existing entry (preserve WandB fields like hotkey)
+                            current_stats[uid].update(sqlite_data)
+                        else:
+                            # New entry from SQLite
+                            current_stats[uid] = sqlite_data
+                    state.stats = current_stats
 
                 # Fast refresh of allocated hotkeys from SQLite
                 # Note: Use 'is not None' to allow empty lists (0 allocated is valid)
@@ -507,14 +520,16 @@ async def sync_data_periodically():
             else:
                 state.subnet_cache = {}
 
-            # Only fetch from WandB if SQLite not available (fast loop handles SQLite)
-            if not SN27_DB_PATH:
-                new_stats = await loop.run_in_executor(
-                    executor,
-                    fetch_validator_stats_from_wandb,
-                    api,
-                    validator_run_path2
-                )
+            # ALWAYS fetch WandB stats - this is the base data with ALL miners
+            # SQLite only has miners that passed PoG validation, WandB has everyone
+            # Fast loop will merge SQLite data on top for quick PoG status updates
+            new_stats = await loop.run_in_executor(
+                executor,
+                fetch_validator_stats_from_wandb,
+                api,
+                validator_run_path2
+            )
+            if new_stats:
                 state.stats = new_stats
 
             hotkeys = metagraph.hotkeys
@@ -536,15 +551,16 @@ async def sync_data_periodically():
             )
             state.hardware_specs_test_cache = hardware_specs_test
 
-            # Only fetch allocated from WandB if SQLite not available (fast loop handles SQLite)
-            if not SN27_DB_PATH:
+            # Fallback to WandB if SQLite not available or allocated_hotkeys_cache is empty
+            if not SN27_DB_PATH or not state.allocated_hotkeys_cache:
                 allocated = await loop.run_in_executor(
                     executor,
                     get_allocated_hotkeys,
                     api,
                     validator_run_path
                 )
-                state.allocated_hotkeys_cache = allocated
+                if allocated:
+                    state.allocated_hotkeys_cache = allocated
 
             penalized = await loop.run_in_executor(
                 executor,
