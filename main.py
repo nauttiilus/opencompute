@@ -869,10 +869,16 @@ def config_page():
     # Fetch the entire config.yaml from the server
     resp = get_data_from_server("config")
     cfg  = resp.get("config", {})
+    # Existing sections
     sc   = cfg.get("subnet_config", {})
     gp   = cfg.get("gpu_performance", {})
-    tm   = cfg.get("gpu_time_models", {})
-    mp   = cfg.get("merkle_proof", {})
+    dm   = cfg.get("delta_model", {})
+    # New sections
+    al   = cfg.get("attestation_layer", {})
+    ch   = cfg.get("chain", {})
+    mn   = cfg.get("miner", {})
+    vl   = cfg.get("validator", {})
+    pg   = cfg.get("pog", {})
 
     ### ── Subnet Configuration ────────────────────────────────
     with st.expander("Subnet Configuration", expanded=True):
@@ -897,7 +903,7 @@ def config_page():
                         help="Relative priority weight"
                     )
 
-            # Right: general subnet parameters + sybil list + reliability + treasury
+            # Right: general subnet parameters + reliability + treasury
             with col2:
                 st.write("**General Subnet Parameters**")
                 total_em     = st.number_input(
@@ -924,17 +930,6 @@ def config_page():
                     min_value=0, max_value=10,
                     value=int(sc.get("rand_delay_blocks_max", 5)),
                     step=1
-                )
-                allow_sybil  = st.checkbox(
-                    "Allow Fake Sybil Slot",
-                    value=bool(sc.get("allow_fake_sybil_slot", True))
-                )
-
-                existing_sybil = sc.get("sybil_check_eligible_hotkeys", [])
-                new_sybil = st.multiselect(
-                    "Select hotkeys eligible for Sybil check",
-                    options=all_keys,
-                    default=existing_sybil
                 )
 
                 reliability_weight = st.number_input(
@@ -970,8 +965,6 @@ def config_page():
                     "blocks_per_epoch":           blocks_epoch,
                     "max_challenge_blocks":       max_chg,
                     "rand_delay_blocks_max":      rand_delay,
-                    "allow_fake_sybil_slot":      allow_sybil,
-                    "sybil_check_eligible_hotkeys": new_sybil,
                     "gpu_weights":                new_gpu_weights,
                     "reliability_weight":       reliability_weight,
                     "treasury_wallet_hotkey":   treasury_wallet_hotkey,
@@ -990,46 +983,35 @@ def config_page():
 
     ### ── PoG - GPU Performance ────────────────────────────────
     with st.expander("PoG - GPU Performance", expanded=False):
-        gp16 = gp.get("GPU_TFLOPS_FP16", {})
-        gp32 = gp.get("GPU_TFLOPS_FP32", {})
         av   = gp.get("GPU_AVRAM", {})
         scs  = gp.get("gpu_scores", {})
 
         with st.form("perf_form"):
             # header
-            c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
-            c1.write("**GPU Name**"); c2.write("**FP16**"); c3.write("**FP32**"); c4.write("**VRAM**"); c5.write("**Score**")
+            c1, c2, c3 = st.columns([2, 1, 1])
+            c1.write("**GPU Name**"); c2.write("**VRAM (GB)**"); c3.write("**Score**")
 
             new_perf = {}
-            for gpu in gp16:
-                v16 = float(gp16.get(gpu, 0.0))
-                v32 = float(gp32.get(gpu, 0.0))
-                vr  = float(av.get(gpu,    0.0))
-                ss  = float(scs.get(gpu,   0.0))
+            for gpu in av:
+                vr  = float(av.get(gpu, 0.0))
+                ss  = float(scs.get(gpu, 0.0))
 
-                c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
+                c1, c2, c3 = st.columns([2, 1, 1])
                 c1.write(gpu)
-                f16 = c2.number_input(f"{gpu}_fp16", value=v16, format="%.2f", label_visibility="collapsed")
-                f32 = c3.number_input(f"{gpu}_fp32", value=v32, format="%.2f", label_visibility="collapsed")
-                vrb = c4.number_input(f"{gpu}_vram", value=vr, format="%.2f", label_visibility="collapsed")
-                scr = c5.number_input(f"{gpu}_score", value=ss, format="%.2f", label_visibility="collapsed")
-                new_perf[gpu] = {"fp16": f16, "fp32": f32, "vram": vrb, "score": scr}
+                vrb = c2.number_input(f"{gpu}_vram", value=vr, format="%.2f", label_visibility="collapsed")
+                scr = c3.number_input(f"{gpu}_score", value=ss, format="%.2f", label_visibility="collapsed")
+                new_perf[gpu] = {"vram": vrb, "score": scr}
 
             submitted2 = st.form_submit_button("Save GPU Performance")
             msg2       = st.empty()
             if submitted2:
-                updated_gp = cfg.get("gpu_performance", {}).copy()
-                updated_gp.update({
-                    "GPU_TFLOPS_FP16": { g: new_perf[g]["fp16"] for g in new_perf },
-                    "GPU_TFLOPS_FP32": { g: new_perf[g]["fp32"] for g in new_perf },
-                    "GPU_AVRAM":        { g: new_perf[g]["vram"] for g in new_perf },
-                    "gpu_scores":       { g: new_perf[g]["score"] for g in new_perf },
-                })
-                cfg["gpu_performance"] = updated_gp
-
+                payload = {"gpu_performance": {
+                    "GPU_AVRAM":  { g: new_perf[g]["vram"] for g in new_perf },
+                    "gpu_scores": { g: new_perf[g]["score"] for g in new_perf },
+                }}
                 r2 = requests.put(
                     f"{SERVER_URL}/config",
-                    json=cfg,
+                    json=payload,
                     headers={"X-Admin-Key": ADMIN_KEY},
                     timeout=10
                 )
@@ -1038,82 +1020,235 @@ def config_page():
                 else:
                     msg2.error(f"❌ GPU performance update failed (status {r2.status_code})")
 
-    ### ── PoG - Quadratic GPU Timing Models ───────────────────
-    with st.expander("PoG - Quadratic GPU Timing Models", expanded=False):
+    ### ── Delta Timing Models ───────────────────
+    with st.expander("Delta Timing Models", expanded=False):
         with st.form("timing_form"):
-            c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
-            c1.write("**GPU Name**"); c2.write("**a0**"); c3.write("**a1**"); c4.write("**a2**"); c5.write("**tol**")
-            new_tm = {}
-            for gpu, params in tm.items():
-                a0 = float(params.get("a0", 0.0))
-                a1 = float(params.get("a1", 0.0))
-                a2 = float(params.get("a2", 0.0))
-                tl = float(params.get("tol", 1.0))
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 1, 1, 1, 1, 1, 1])
+            c1.write("**GPU Name**"); c2.write("**base1**"); c3.write("**base2**"); c4.write("**a1**"); c5.write("**a2**"); c6.write("**tol1**"); c7.write("**tol2**")
+            new_dm = {}
+            for gpu, params in dm.items():
+                b1 = float(params.get("base1", 12.5))
+                b2 = float(params.get("base2", 12.5))
+                a1 = float(params.get("a1", 0.2))
+                a2 = float(params.get("a2", 0.02))
+                t1 = float(params.get("tol1", 1.15))
+                t2 = float(params.get("tol2", 1.20))
 
-                c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
+                c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 1, 1, 1, 1, 1, 1])
                 c1.write(gpu)
-                na0 = c2.number_input(f"{gpu}_a0", value=a0, format="%.2f", label_visibility="collapsed")
-                na1 = c3.number_input(f"{gpu}_a1", value=a1, format="%.2f", label_visibility="collapsed")
-                na2 = c4.number_input(f"{gpu}_a2", value=a2, format="%.2f", label_visibility="collapsed")
-                ntl = c5.number_input(f"{gpu}_tol", value=tl, format="%.2f", label_visibility="collapsed")
-                new_tm[gpu] = {"a0": na0, "a1": na1, "a2": na2, "tol": ntl}
+                nb1 = c2.number_input(f"{gpu}_base1", value=b1, format="%.2f", label_visibility="collapsed")
+                nb2 = c3.number_input(f"{gpu}_base2", value=b2, format="%.2f", label_visibility="collapsed")
+                na1 = c4.number_input(f"{gpu}_a1", value=a1, format="%.2f", label_visibility="collapsed")
+                na2 = c5.number_input(f"{gpu}_a2", value=a2, format="%.2f", label_visibility="collapsed")
+                nt1 = c6.number_input(f"{gpu}_tol1", value=t1, format="%.2f", label_visibility="collapsed")
+                nt2 = c7.number_input(f"{gpu}_tol2", value=t2, format="%.2f", label_visibility="collapsed")
+                new_dm[gpu] = {"base1": nb1, "base2": nb2, "a1": na1, "a2": na2, "tol1": nt1, "tol2": nt2}
 
-            submitted3 = st.form_submit_button("Save GPU Timing Models")
+            submitted3 = st.form_submit_button("Save Delta Models")
             msg3       = st.empty()
             if submitted3:
-                cfg["gpu_time_models"] = new_tm
+                payload = {"delta_model": new_dm}
                 r3 = requests.put(
                     f"{SERVER_URL}/config",
-                    json=cfg,
+                    json=payload,
                     headers={"X-Admin-Key": ADMIN_KEY},
                     timeout=10
                 )
                 if r3.status_code == 200:
-                    msg3.success("✅ GPU timing models updated")
+                    msg3.success("✅ Delta models updated")
                 else:
-                    msg3.error(f"❌ GPU timing models update failed (status {r3.status_code})")
+                    msg3.error(f"❌ Delta models update failed (status {r3.status_code})")
 
-    ### ── PoG - Merkle Proof Settings ────────────────────────
-    with st.expander("PoG - Merkle Proof Settings", expanded=False):
-        with st.form("merkle_form"):
+    ### ── Attestation Layer ────────────────────────────────
+    with st.expander("Attestation Layer", expanded=False):
+        with st.form("attestation_form"):
             col1, col2 = st.columns(2)
-            miner_path  = col1.text_input("Miner Script Path", value=mp.get("miner_script_path", ""))
-            hash_algo   = col1.text_input("Hash Algorithm", value=mp.get("hash_algorithm", ""))
-            pog_spots   = col1.number_input("Spots per GPU", min_value=1, max_value=100, value=int(mp.get("spot_per_gpu", 3)))
-            retry_int   = col1.number_input("PoG Retry Interval (s)", min_value=1, max_value=3600, value=int(mp.get("pog_retry_interval", 60)))
+            with col1:
+                al_url = st.text_input("URL", value=al.get("url", ""))
+                al_auth = st.text_input("Auth Token", value=al.get("auth_token", ""), type="password")
+                al_connect_timeout = st.number_input("Connect Timeout (s)", min_value=1, max_value=60, value=int(al.get("connect_timeout_sec", 5)))
+                al_read_timeout = st.number_input("Read Timeout (s)", min_value=1, max_value=120, value=int(al.get("read_timeout_sec", 30)))
+                al_retry_statuses = st.text_input("Retry Statuses (comma-separated)", value=al.get("retry_statuses", "408,429,500,502,503,504"))
+            with col2:
+                al_retry_max = st.number_input("Retry Max", min_value=0, max_value=10, value=int(al.get("retry_max", 2)))
+                al_retry_base = st.number_input("Retry Base (s)", min_value=0.1, max_value=10.0, value=float(al.get("retry_base_sec", 0.5)), format="%.1f")
+                al_retry_max_sec = st.number_input("Retry Max (s)", min_value=1.0, max_value=60.0, value=float(al.get("retry_max_sec", 5.0)), format="%.1f")
+                al_cache_ttl = st.number_input("Cache TTL (s)", min_value=0, max_value=3600, value=int(al.get("cache_ttl_sec", 300)))
 
-            time_tol    = col2.number_input("Time Tolerance (s)", min_value=0, max_value=300, value=int(mp.get("time_tolerance", 5)))
-            submat      = col2.number_input("Submatrix Size", min_value=1, max_value=10_000, value=int(mp.get("submatrix_size", 512)))
-            buf_factor  = col2.number_input("Buffer Factor", min_value=0.0, max_value=1.0, value=float(mp.get("buffer_factor", 0.45)), format="%.2f")
-            retry_lim   = col2.number_input("PoG Retry Limit", min_value=1, max_value=100, value=int(mp.get("pog_retry_limit", 20)))
-            max_workers = col2.number_input("Max Workers", min_value=1, max_value=1024, value=int(mp.get("max_workers", 64)))
-            max_delay   = col2.number_input("Max Random Delay (s)", min_value=0, max_value=3600, value=int(mp.get("max_random_delay", 600)))
-
-            submitted4 = st.form_submit_button("Save Merkle Settings")
-            msg4       = st.empty()
-            if submitted4:
-                cfg["merkle_proof"] = {
-                    "miner_script_path":  miner_path,
-                    "hash_algorithm":     hash_algo,
-                    "time_tolerance":     time_tol,
-                    "submatrix_size":     submat,
-                    "buffer_factor":      buf_factor,
-                    "spot_per_gpu":       pog_spots,
-                    "pog_retry_limit":    retry_lim,
-                    "pog_retry_interval": retry_int,
-                    "max_workers":        max_workers,
-                    "max_random_delay":   max_delay
-                }
-                r4 = requests.put(
-                    f"{SERVER_URL}/config",
-                    json=cfg,
-                    headers={"X-Admin-Key": ADMIN_KEY},
-                    timeout=10
-                )
-                if r4.status_code == 200:
-                    msg4.success("✅ Merkle proof settings updated")
+            submitted_al = st.form_submit_button("Save Attestation Layer")
+            msg_al = st.empty()
+            if submitted_al:
+                payload = {"attestation_layer": {
+                    "url": al_url, "auth_token": al_auth,
+                    "connect_timeout_sec": al_connect_timeout, "read_timeout_sec": al_read_timeout,
+                    "retry_max": al_retry_max, "retry_base_sec": al_retry_base, "retry_max_sec": al_retry_max_sec,
+                    "retry_statuses": al_retry_statuses, "cache_ttl_sec": al_cache_ttl
+                }}
+                r = requests.put(f"{SERVER_URL}/config", json=payload, headers={"X-Admin-Key": ADMIN_KEY}, timeout=10)
+                if r.status_code == 200:
+                    msg_al.success("✅ Attestation layer updated")
                 else:
-                    msg4.error(f"❌ Merkle settings update failed (status {r4.status_code})")
+                    msg_al.error(f"❌ Update failed (status {r.status_code}): {r.text}")
+
+    ### ── Chain Configuration ────────────────────────────────
+    with st.expander("Chain Configuration", expanded=False):
+        with st.form("chain_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                ch_network = st.selectbox("Network", ["finney", "test", "local"], index=["finney", "test", "local"].index(ch.get("network", "finney")) if ch.get("network", "finney") in ["finney", "test", "local"] else 0)
+                ch_rpc_http = st.text_input("RPC HTTP", value=ch.get("rpc_http", ""))
+                ch_rpc_wss = st.text_input("RPC WSS", value=ch.get("rpc_wss", ""))
+            with col2:
+                ch_timeout = st.number_input("Request Timeout (s)", min_value=1, max_value=60, value=int(ch.get("request_timeout_sec", 6)))
+                ch_cache = st.number_input("Block Hash Cache", min_value=1, max_value=10000, value=int(ch.get("block_hash_cache", 1024)))
+
+            submitted_ch = st.form_submit_button("Save Chain Config")
+            msg_ch = st.empty()
+            if submitted_ch:
+                payload = {"chain": {
+                    "network": ch_network, "rpc_http": ch_rpc_http, "rpc_wss": ch_rpc_wss,
+                    "request_timeout_sec": ch_timeout, "block_hash_cache": ch_cache
+                }}
+                r = requests.put(f"{SERVER_URL}/config", json=payload, headers={"X-Admin-Key": ADMIN_KEY}, timeout=10)
+                if r.status_code == 200:
+                    msg_ch.success("✅ Chain config updated")
+                else:
+                    msg_ch.error(f"❌ Update failed (status {r.status_code}): {r.text}")
+
+    ### ── Miner Configuration ────────────────────────────────
+    with st.expander("Miner Configuration", expanded=False):
+        with st.form("miner_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Block Intervals**")
+                mn_bi_val = st.number_input("Validator Update", min_value=1, max_value=1000, value=int(mn.get("block_interval_validator_update", 30)))
+                mn_bi_specs = st.number_input("Specs Update", min_value=1, max_value=1000, value=int(mn.get("block_interval_specs_update", 150)))
+                mn_bi_sync = st.number_input("Sync Status", min_value=1, max_value=1000, value=int(mn.get("block_interval_sync_status", 25)))
+                mn_bi_alloc = st.number_input("Allocation Check", min_value=1, max_value=1000, value=int(mn.get("block_interval_allocation_check", 15)))
+            with col2:
+                st.write("**Identity & Runtime**")
+                mn_wallet = st.text_input("Wallet Name", value=mn.get("wallet_name", "miner_wallet"))
+                mn_hotkey = st.text_input("Hotkey Name", value=mn.get("hotkey_name", "miner_hotkey"))
+                mn_run_path = st.text_input("Run Root Path", value=mn.get("run_root_path", "/dev/shm/miner"))
+                mn_poll = st.number_input("Poll Sec", min_value=0.1, max_value=10.0, value=float(mn.get("poll_sec", 0.5)), format="%.1f")
+
+            submitted_mn = st.form_submit_button("Save Miner Config")
+            msg_mn = st.empty()
+            if submitted_mn:
+                payload = {"miner": {
+                    "block_interval_validator_update": mn_bi_val, "block_interval_specs_update": mn_bi_specs,
+                    "block_interval_sync_status": mn_bi_sync, "block_interval_allocation_check": mn_bi_alloc,
+                    "wallet_name": mn_wallet, "hotkey_name": mn_hotkey,
+                    "run_root_path": mn_run_path, "poll_sec": mn_poll
+                }}
+                r = requests.put(f"{SERVER_URL}/config", json=payload, headers={"X-Admin-Key": ADMIN_KEY}, timeout=10)
+                if r.status_code == 200:
+                    msg_mn.success("✅ Miner config updated")
+                else:
+                    msg_mn.error(f"❌ Update failed (status {r.status_code}): {r.text}")
+
+    ### ── Validator Configuration ────────────────────────────────
+    with st.expander("Validator Configuration", expanded=False):
+        with st.form("validator_form"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.write("**Block Intervals**")
+                vl_bi_hw = st.number_input("Hardware Info", min_value=1, max_value=1000, value=int(vl.get("block_interval_hardware_info", 150)))
+                vl_bi_miner = st.number_input("Miner Check", min_value=1, max_value=1000, value=int(vl.get("block_interval_miner_check", 50)))
+                vl_bi_sync = st.number_input("Sync Status", min_value=1, max_value=1000, value=int(vl.get("block_interval_sync_status", 25)))
+                vl_bi_token = st.number_input("Token Refresh", min_value=1, max_value=1000, value=int(vl.get("block_interval_token_refresh", 600)))
+            with col2:
+                st.write("**Timeouts (seconds)**")
+                vl_pubsub_to = st.number_input("Pubsub Timeout", min_value=1, max_value=300, value=int(vl.get("pubsub_timeout_sec", 30)))
+                vl_ssh_to = st.number_input("SSH Timeout", min_value=1, max_value=300, value=int(vl.get("ssh_timeout_sec", 30)))
+                vl_alloc_to = st.number_input("Allocation Timeout", min_value=1, max_value=300, value=int(vl.get("allocation_timeout_sec", 20)))
+                vl_dealloc_to = st.number_input("Deallocation Timeout", min_value=1, max_value=300, value=int(vl.get("deallocation_timeout_sec", 15)))
+            with col3:
+                st.write("**Retries & Server**")
+                vl_alloc_retry = st.number_input("Allocation Max Retries", min_value=0, max_value=10, value=int(vl.get("allocation_max_retries", 2)))
+                vl_dealloc_retry = st.number_input("Deallocation Max Retries", min_value=0, max_value=10, value=int(vl.get("deallocation_max_retries", 3)))
+                vl_backoff = st.number_input("Retry Backoff (s)", min_value=1, max_value=60, value=int(vl.get("retry_backoff_sec", 5)))
+                vl_server_ip = st.text_input("Server IP", value=vl.get("server_ip", "65.108.33.88"))
+                vl_server_port = st.text_input("Server Port", value=vl.get("server_port", "8000"))
+                vl_pull_int = st.number_input("Pull Interval (s)", min_value=1, max_value=3600, value=int(vl.get("pull_interval", 60)))
+
+            submitted_vl = st.form_submit_button("Save Validator Config")
+            msg_vl = st.empty()
+            if submitted_vl:
+                payload = {"validator": {
+                    "block_interval_hardware_info": vl_bi_hw, "block_interval_miner_check": vl_bi_miner,
+                    "block_interval_sync_status": vl_bi_sync, "block_interval_token_refresh": vl_bi_token,
+                    "pubsub_timeout_sec": vl_pubsub_to, "ssh_timeout_sec": vl_ssh_to,
+                    "allocation_timeout_sec": vl_alloc_to, "deallocation_timeout_sec": vl_dealloc_to,
+                    "allocation_max_retries": vl_alloc_retry, "deallocation_max_retries": vl_dealloc_retry,
+                    "retry_backoff_sec": vl_backoff, "server_ip": vl_server_ip, "server_port": vl_server_port,
+                    "pull_interval": vl_pull_int
+                }}
+                r = requests.put(f"{SERVER_URL}/config", json=payload, headers={"X-Admin-Key": ADMIN_KEY}, timeout=10)
+                if r.status_code == 200:
+                    msg_vl.success("✅ Validator config updated")
+                else:
+                    msg_vl.error(f"❌ Update failed (status {r.status_code}): {r.text}")
+
+    ### ── PoG Scheduling ────────────────────────────────
+    with st.expander("PoG Scheduling", expanded=False):
+        with st.form("pog_form"):
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.write("**Scheduling**")
+                pg_exec = st.number_input("Exec Every Blocks", min_value=1, max_value=100, value=int(pg.get("exec_every_blocks", 5)))
+                pg_interval = st.number_input("PoG Interval Blocks", min_value=1, max_value=100, value=int(pg.get("pog_interval_blocks", 15)))
+                pg_batch = st.number_input("Batch Size", min_value=1, max_value=256, value=int(pg.get("batch_size", 64)))
+                pg_cache_ttl = st.number_input("Finalized Cache TTL (s)", min_value=1, max_value=300, value=int(pg.get("finalized_cache_ttl_sec", 10)))
+                pg_rpc_backoff = st.number_input("RPC Backoff (s)", min_value=1, max_value=120, value=int(pg.get("rpc_backoff_sec", 20)))
+                pg_grace = st.number_input("Allocation Grace (s)", min_value=0, max_value=600, value=int(pg.get("allocation_grace_sec", 120)))
+            with col2:
+                st.write("**Matrix & Compute**")
+                pg_rows = st.number_input("C Open Rows", min_value=1, max_value=16, value=int(pg.get("c_open_rows", 2)))
+                pg_cols = st.number_input("C Open Cols", min_value=1, max_value=16, value=int(pg.get("c_open_cols", 2)))
+                pg_ncap = st.number_input("N Cap", min_value=1024, max_value=1048576, value=int(pg.get("n_cap", 262144)))
+                pg_anchor = st.selectbox("Anchor Kind", ["heavy", "micro"], index=0 if pg.get("anchor_kind", "heavy") == "heavy" else 1)
+                pg_buf_micro = st.number_input("Buffer Micro", min_value=0.0, max_value=1.0, value=float(pg.get("buffer_micro", 0.001)), format="%.4f")
+                pg_buf_heavy = st.number_input("Buffer Heavy", min_value=0.0, max_value=1.0, value=float(pg.get("buffer_heavy", 0.4)), format="%.2f")
+            with col3:
+                st.write("**Streams & CC**")
+                pg_stream_micro = st.number_input("Stream Micro Priority", min_value=0, max_value=10, value=int(pg.get("stream_micro_priority", 1)))
+                pg_stream_heavy = st.number_input("Stream Heavy Priority", min_value=0, max_value=10, value=int(pg.get("stream_heavy_priority", 0)))
+                pg_cc_enabled = st.checkbox("CC Attestation Enabled", value=bool(pg.get("cc_attestation_enabled", True)))
+                pg_cc_mode = st.selectbox("CC Attestation Mode", ["mock", "production"], index=0 if pg.get("cc_attestation_mode", "mock") == "mock" else 1)
+            with col4:
+                st.write("**Proof Settings**")
+                pg_miner_path = st.text_input("Miner Script Path", value=pg.get("miner_script_path", ""))
+                pg_hash_algo = st.text_input("Hash Algorithm", value=pg.get("hash_algorithm", "sha256"))
+                pg_time_tol = st.number_input("Time Tolerance (s)", min_value=0, max_value=300, value=int(pg.get("time_tolerance", 5)))
+                pg_submat = st.number_input("Submatrix Size", min_value=1, max_value=10000, value=int(pg.get("submatrix_size", 512)))
+                pg_buf_factor = st.number_input("Buffer Factor", min_value=0.0, max_value=1.0, value=float(pg.get("buffer_factor", 0.45)), format="%.2f")
+                pg_spots = st.number_input("Spots per GPU", min_value=1, max_value=100, value=int(pg.get("spot_per_gpu", 3)))
+                pg_retry_lim = st.number_input("PoG Retry Limit", min_value=1, max_value=100, value=int(pg.get("pog_retry_limit", 20)))
+                pg_retry_int = st.number_input("PoG Retry Interval (s)", min_value=1, max_value=3600, value=int(pg.get("pog_retry_interval", 60)))
+                pg_max_workers = st.number_input("Max Workers", min_value=1, max_value=1024, value=int(pg.get("max_workers", 64)))
+                pg_max_delay = st.number_input("Max Random Delay (s)", min_value=0, max_value=3600, value=int(pg.get("max_random_delay", 600)))
+
+            submitted_pg = st.form_submit_button("Save PoG Settings")
+            msg_pg = st.empty()
+            if submitted_pg:
+                payload = {"pog": {
+                    "exec_every_blocks": pg_exec, "pog_interval_blocks": pg_interval, "batch_size": pg_batch,
+                    "finalized_cache_ttl_sec": pg_cache_ttl, "rpc_backoff_sec": pg_rpc_backoff, "allocation_grace_sec": pg_grace,
+                    "c_open_rows": pg_rows, "c_open_cols": pg_cols, "n_cap": pg_ncap,
+                    "anchor_kind": pg_anchor, "buffer_micro": pg_buf_micro, "buffer_heavy": pg_buf_heavy,
+                    "stream_micro_priority": pg_stream_micro, "stream_heavy_priority": pg_stream_heavy,
+                    "cc_attestation_enabled": pg_cc_enabled, "cc_attestation_mode": pg_cc_mode,
+                    "miner_script_path": pg_miner_path, "hash_algorithm": pg_hash_algo,
+                    "time_tolerance": pg_time_tol, "submatrix_size": pg_submat, "buffer_factor": pg_buf_factor,
+                    "spot_per_gpu": pg_spots, "pog_retry_limit": pg_retry_lim, "pog_retry_interval": pg_retry_int,
+                    "max_workers": pg_max_workers, "max_random_delay": pg_max_delay
+                }}
+                r = requests.put(f"{SERVER_URL}/config", json=payload, headers={"X-Admin-Key": ADMIN_KEY}, timeout=10)
+                if r.status_code == 200:
+                    msg_pg.success("✅ PoG settings updated")
+                else:
+                    msg_pg.error(f"❌ Update failed (status {r.status_code}): {r.text}")
 
 
 # add next to get_data_from_server()

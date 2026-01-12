@@ -1,8 +1,9 @@
 from fastapi import FastAPI, Header, HTTPException
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple, Union
 import bittensor as bt
 import wandb
 import os
+import shutil
 from dotenv import load_dotenv
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +32,83 @@ PUBLIC_WANDB_ENTITY = "neuralinternet"
 
 # Thread pool
 executor = ThreadPoolExecutor(max_workers=4)
+
+# ─────────────────────── CONFIG VALIDATION & MERGE ───────────────────────
+# Type definitions for config validation (allows unknown fields for flexibility)
+CONFIG_TYPES = {
+    "attestation_layer": {
+        "url": str, "auth_token": str,
+        "connect_timeout_sec": (int, float), "read_timeout_sec": (int, float),
+        "retry_max": int, "retry_base_sec": (int, float), "retry_max_sec": (int, float),
+        "retry_statuses": str, "cache_ttl_sec": int,
+    },
+    "chain": {
+        "network": str, "rpc_http": str, "rpc_wss": str,
+        "request_timeout_sec": (int, float), "block_hash_cache": int,
+    },
+    "miner": {
+        "block_interval_validator_update": int, "block_interval_specs_update": int,
+        "block_interval_sync_status": int, "block_interval_allocation_check": int,
+        "wallet_name": str, "hotkey_name": str, "run_root_path": str, "poll_sec": (int, float),
+    },
+    "validator": {
+        "block_interval_hardware_info": int, "block_interval_miner_check": int,
+        "block_interval_sync_status": int, "block_interval_token_refresh": int,
+        "pubsub_timeout_sec": (int, float), "ssh_timeout_sec": (int, float),
+        "allocation_timeout_sec": (int, float), "deallocation_timeout_sec": (int, float),
+        "allocation_max_retries": int, "deallocation_max_retries": int,
+        "retry_backoff_sec": (int, float), "server_ip": str, "server_port": str, "pull_interval": int,
+    },
+    "pog": {
+        "exec_every_blocks": int, "finalized_cache_ttl_sec": int, "rpc_backoff_sec": (int, float),
+        "allocation_grace_sec": int, "pog_interval_blocks": int, "batch_size": int,
+        "c_open_rows": int, "c_open_cols": int, "n_cap": int,
+        "anchor_kind": str, "buffer_micro": (int, float), "buffer_heavy": (int, float),
+        "stream_micro_priority": int, "stream_heavy_priority": int,
+        "cc_attestation_enabled": bool, "cc_attestation_mode": str,
+        "miner_script_path": str, "time_tolerance": int, "submatrix_size": int,
+        "buffer_factor": (int, float), "spot_per_gpu": int, "hash_algorithm": str,
+        "pog_retry_limit": int, "pog_retry_interval": int, "max_workers": int, "max_random_delay": int,
+    },
+    # Complex sections with dynamic keys - allow any dict structure
+    "delta_model": dict,
+    "gpu_performance": dict,
+    "subnet_config": dict,
+}
+
+def deep_merge(base: dict, updates: dict) -> dict:
+    """Recursively merge updates into base dict. Only updates provided fields."""
+    result = copy.deepcopy(base)
+    for key, value in updates.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+def validate_config_types(payload: dict) -> list:
+    """Validate that payload values match expected types. Returns list of errors."""
+    errors = []
+    for section, fields in payload.items():
+        if section not in CONFIG_TYPES:
+            # Allow unknown sections (for flexibility with existing config)
+            continue
+        if not isinstance(fields, dict):
+            continue
+        type_spec = CONFIG_TYPES[section]
+        if not isinstance(type_spec, dict):
+            continue
+        for field, value in fields.items():
+            if field not in type_spec:
+                continue  # Allow unknown fields within known sections
+            expected = type_spec[field]
+            if isinstance(expected, tuple):
+                if not isinstance(value, expected):
+                    errors.append(f"{section}.{field}: expected {expected}, got {type(value).__name__}")
+            else:
+                if not isinstance(value, expected):
+                    errors.append(f"{section}.{field}: expected {expected.__name__}, got {type(value).__name__}")
+    return errors
 
 def fetch_validator_stats(api, run_path: str) -> Dict[int, Any]:
     """Fetches the 'stats' dict from a validator run, converting string keys to integer keys."""
@@ -420,15 +498,52 @@ async def update_config(
     payload: Dict[str, Any],
     x_admin_key: str = Header(None)
 ) -> Dict[str, Any]:
+    """
+    Update config with MERGE strategy for robustness.
+    - Only updates provided fields, preserves others
+    - Creates backup before writing
+    - Uses atomic write (temp file + rename)
+    - Validates types before any write
+    """
     if not ENABLE_CONFIG_WRITE:
         raise HTTPException(status_code=403, detail="Config writing disabled by server policy")
     if x_admin_key != ADMIN_KEY or not ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Forbidden")
+
+    # 1. Validate payload types
+    errors = validate_config_types(payload)
+    if errors:
+        raise HTTPException(status_code=400, detail=f"Invalid config: {'; '.join(errors)}")
+
     try:
-        with open("config.yaml", "w") as f:
-            yaml.safe_dump(payload, f, sort_keys=False)
+        # 2. Read current config
+        try:
+            with open("config.yaml", "r") as f:
+                current_config = yaml.safe_load(f) or {}
+        except FileNotFoundError:
+            current_config = {}
+
+        # 3. Backup current config before any modification
+        if os.path.exists("config.yaml"):
+            shutil.copy("config.yaml", "config.yaml.bak")
+
+        # 4. Merge updates into current config
+        new_config = deep_merge(current_config, payload)
+
+        # 5. Atomic write: write to temp file, then rename
+        with open("config.yaml.tmp", "w") as f:
+            yaml.safe_dump(new_config, f, sort_keys=False)
+        os.replace("config.yaml.tmp", "config.yaml")
+
     except Exception as e:
+        # Clean up temp file if it exists
+        if os.path.exists("config.yaml.tmp"):
+            try:
+                os.remove("config.yaml.tmp")
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
+
     return {"status": "ok"}
 
 from routes.rental_server import router as rental_router

@@ -23,6 +23,7 @@ from utils import RSAEncryption as rsa
 from compute.protocol import Allocate
 from compute.axon import ComputeSubnetSubtensor
 from utils.wandb_sync import update_allocations_in_wandb
+from utils.sn27_db import update_allocation_db
 
 # Import global caches from server
 import state
@@ -71,6 +72,14 @@ class AllocateRequest(BaseModel):
     hotkey: str
     timeline: int | None = 1
     docker_image: str | None = "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime"
+    ssh_public_key: str | None = None  # Optional: client-provided SSH public key
+
+
+# Default SSH public key for rentals (can be overridden via env var or request)
+DEFAULT_RENTAL_SSH_PUBLIC_KEY = os.getenv(
+    "RENTAL_SSH_PUBLIC_KEY",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJt//D5Ourn8ttCFUBYM9oafO4Ht8il8VrPkgfF9Qiq+ fabianmatthias_mueller@gmail.com"
+)
 
 class DeallocateRequest(BaseModel):
     hotkey: str
@@ -263,10 +272,14 @@ async def allocate_miner(req: AllocateRequest = Body(...)) -> Dict[str, Any]:
         "gpu":       {"count": 1, "capacity": 0, "type": ""},
         "hard_disk": {"capacity": 1_073_741_824},
         "ram":       {"capacity": 1_073_741_824},
-        "testing":   True,
+        "testing":   False,
     }
+    # Use client-provided SSH key or fall back to default
+    ssh_key_to_use = req.ssh_public_key or DEFAULT_RENTAL_SSH_PUBLIC_KEY
+
     docker_requirement = {
-        "base_image": req.docker_image or "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime"
+        "base_image": req.docker_image or "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime",
+        "ssh_key": ssh_key_to_use,
     }
 
     MAX_TRIES = 5
@@ -302,7 +315,7 @@ async def allocate_miner(req: AllocateRequest = Body(...)) -> Dict[str, Any]:
                         "host": axon.ip,
                         "port": info["port"],
                         "username": info["username"],
-                        "password": info["password"],
+                        "ssh_key": ssh_key_to_use,  # SSH key-based auth (no password)
                     },
                     "axon": {"ip": axon.ip, "port": axon.port},
                     "docker_image": docker_requirement["base_image"],
@@ -321,6 +334,7 @@ async def allocate_miner(req: AllocateRequest = Body(...)) -> Dict[str, Any]:
 
                 print(f"[DEBUG] Attempt {attempt} - Allocated {axon.ip}:{axon.port}")
                 update_allocations_in_wandb(wandb_instance, WANDB_RUN_PATH, hotkey=hk, action="add")    # after allocation
+                update_allocation_db(hk, rental_details, True)  # update SN27 validator allocation DB
 
                 return {
                     "status": True,
@@ -330,9 +344,10 @@ async def allocate_miner(req: AllocateRequest = Body(...)) -> Dict[str, Any]:
                         "host": axon.ip,
                         "port": info["port"],
                         "username": info["username"],
-                        "password": info["password"],
+                        "auth": "ssh_key",  # Auth method indicator
                     },
                     "public_key": public_key,
+                    "ssh_public_key": ssh_key_to_use,
                 }
 
             print(f"[DEBUG] Attempt {attempt} - Allocator busy or declined.")
@@ -409,6 +424,7 @@ async def deallocate_miner(req: DeallocateRequest = Body(...)) -> Dict[str, Any]
                     print(f"[DEBUG] Deallocated miner {hk}")
                     remove_rental(uid)
                     update_allocations_in_wandb(wandb_instance, WANDB_RUN_PATH, hotkey=hk, action="remove") # after deallocation
+                    update_allocation_db(hk, {}, False)  # remove from SN27 validator allocation DB
                     return {"status": True, "message": f"Deallocated miner {hk}"}
 
                 retry_count += 1
@@ -425,6 +441,7 @@ async def deallocate_miner(req: DeallocateRequest = Body(...)) -> Dict[str, Any]
     print(f"[DEBUG] Resetting allocation status of miner {hk}.")
     remove_rental(uid)
     update_allocations_in_wandb(wandb_instance, WANDB_RUN_PATH, hotkey=hk, action="remove") # after deallocation
+    update_allocation_db(hk, {}, False)  # remove from SN27 validator allocation DB
     return {"status": True, "message": f"Resetted allocation status of miner {hk}."}
 
 @router.get("/rent/rentals")
