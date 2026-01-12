@@ -4,6 +4,7 @@ import bittensor as bt
 import wandb
 import os
 import shutil
+import sqlite3
 from dotenv import load_dotenv
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +25,10 @@ load_dotenv()
 api_key = os.getenv("WANDB_API_KEY")
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENABLE_CONFIG_WRITE = os.getenv("ENABLE_CONFIG_WRITE", "false").strip().lower() in ("1","true","yes","on")
+
+# Path to SN27 validator's SQLite database (same instance - for faster PoG stats access)
+# Uses existing SN27_DB_PATH from .env
+SN27_DB_PATH = os.getenv("SN27_DB_PATH", "")
 
 
 # Constants for W&B
@@ -110,8 +115,55 @@ def validate_config_types(payload: dict) -> list:
                     errors.append(f"{section}.{field}: expected {expected.__name__}, got {type(value).__name__}")
     return errors
 
-def fetch_validator_stats(api, run_path: str) -> Dict[int, Any]:
-    """Fetches the 'stats' dict from a validator run, converting string keys to integer keys."""
+def fetch_stats_from_sqlite(db_path: str) -> Dict[int, Any]:
+    """
+    Fetch PoG stats directly from validator's SQLite database.
+    Returns dict mapping uid -> stats data, or empty dict on failure.
+    """
+    if not db_path or not os.path.exists(db_path):
+        return {}
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Query the stats table (matches SN27 schema)
+        cursor.execute("""
+            SELECT uid, hotkey, gpu_specs, score, allocated, own_score, reliability_score
+            FROM stats
+        """)
+
+        stats = {}
+        for row in cursor.fetchall():
+            uid = row["uid"]
+            # Parse gpu_specs JSON
+            gpu_specs = {}
+            if row["gpu_specs"]:
+                try:
+                    gpu_specs = json.loads(row["gpu_specs"])
+                except:
+                    pass
+
+            stats[uid] = {
+                "hotkey": row["hotkey"],
+                "gpu_specs": gpu_specs,
+                "score": row["score"],
+                "allocated": bool(row["allocated"]),
+                "own_score": bool(row["own_score"]),
+                "reliability_score": row["reliability_score"],
+            }
+
+        conn.close()
+        print(f"[SQLite] Loaded {len(stats)} stats from {db_path}")
+        return stats
+
+    except Exception as e:
+        print(f"[SQLite] Error reading from {db_path}: {e}")
+        return {}
+
+def fetch_validator_stats_from_wandb(api, run_path: str) -> Dict[int, Any]:
+    """Fetches the 'stats' dict from a validator WandB run, converting string keys to integer keys."""
     try:
         run = api.run(run_path)
         if run:
@@ -123,10 +175,25 @@ def fetch_validator_stats(api, run_path: str) -> Dict[int, Any]:
                     converted[int(k)] = v
                 except:
                     pass
+            print(f"[WandB] Loaded {len(converted)} stats from {run_path}")
             return converted
     except Exception as e:
-        print(f"Error fetching validator stats from {run_path}: {e}")
+        print(f"[WandB] Error fetching validator stats from {run_path}: {e}")
     return {}
+
+def fetch_validator_stats(api, run_path: str) -> Dict[int, Any]:
+    """
+    Fetch validator stats - tries SQLite first (faster), falls back to WandB.
+    SQLite is instant when on same instance; WandB has network latency.
+    """
+    # Try SQLite first (same instance = instant access)
+    if SN27_DB_PATH:
+        sqlite_stats = fetch_stats_from_sqlite(SN27_DB_PATH)
+        if sqlite_stats:
+            return sqlite_stats
+
+    # Fall back to WandB
+    return fetch_validator_stats_from_wandb(api, run_path)
 
 def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
     """
@@ -187,11 +254,33 @@ def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
 
     return db_specs_dict
 
+def get_allocated_hotkeys_from_sqlite(db_path: str) -> List[str]:
+    """Fetch allocated hotkeys directly from validator's SQLite database."""
+    if not db_path or not os.path.exists(db_path):
+        return []
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        cursor = conn.cursor()
+        cursor.execute("SELECT hotkey FROM stats WHERE allocated = 1")
+        hotkeys = [row[0] for row in cursor.fetchall() if row[0]]
+        conn.close()
+        return hotkeys
+    except Exception as e:
+        print(f"[SQLite] Error fetching allocated hotkeys: {e}")
+        return []
+
 def get_allocated_hotkeys(api, run_path: str) -> List[str]:
     """
-    Fetch allocated hotkeys from a validator run 
-    by looking at the stats for where 'allocated' == True.
+    Fetch allocated hotkeys - tries SQLite first, falls back to WandB.
     """
+    # Try SQLite first
+    if SN27_DB_PATH:
+        sqlite_alloc = get_allocated_hotkeys_from_sqlite(SN27_DB_PATH)
+        if sqlite_alloc:
+            return sqlite_alloc
+
+    # Fall back to WandB
     allocated_hotkeys = []
     try:
         run = api.run(run_path)
@@ -204,7 +293,7 @@ def get_allocated_hotkeys(api, run_path: str) -> List[str]:
                     if hotkey:
                         allocated_hotkeys.append(hotkey)
     except Exception as e:
-        print(f"Error fetching allocated hotkeys from stats for run {run_path}: {e}")
+        print(f"[WandB] Error fetching allocated hotkeys from stats for run {run_path}: {e}")
     return allocated_hotkeys
 
 def get_penalized_hotkeys_id(api, run_path: str) -> List[str]:
