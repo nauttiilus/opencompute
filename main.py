@@ -47,15 +47,14 @@ SERVER_PORT    = get_config("SERVER_PORT", "8000")
 SERVER_URL     = f"http://{SERVER_IP}:{SERVER_PORT}"
 BLUE           = "#1976D2"
 
-st.set_page_config(page_title="NI-Compute", layout="wide", page_icon="Icon_White_crop.png")
+st.set_page_config(page_title="Nodexo Compute", layout="wide", page_icon="Nodexo-Logo.svg")
 
 # ─────────────────────────── CSS ─────────────────────────────
 st.markdown(f"""
 <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
 <style>
   img[data-testid="stLogo"] {{
-    height: 8rem !important;
-    width: auto !important;
+    filter: invert(1);
   }}
   .icon {{
     font-family: 'Material Icons';
@@ -78,7 +77,7 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-st.logo("Neural_Internet_White_crop.png", size="large")
+st.logo("Nodexo-Logo.svg", size="large")
 
 # ───────────────────────── SERVER CALL ────────────────────────
 def get_data_from_server(endpoint: str):
@@ -217,7 +216,7 @@ def plot_incentive_vs_uid(metagraph_data):
 
 # ───────────────────────── PAGES ─────────────────────────────
 def dashboard():
-    st.title("Dashboard – NI Compute")
+    st.title("Dashboard – Nodexo Compute")
     with st.spinner("Loading..."):
         specs = get_data_from_server("specs").get("specs", {})
         alloc = get_data_from_server("allocated_keys").get("allocated_keys", [])
@@ -843,12 +842,12 @@ def benchmark():
 
 def help_links():
     st.title("Help & Resources")
-    st.subheader("Neural Dashboard")
-    st.markdown('- <span class="icon">dashboard</span> <a href="https://app.neuralinternet.ai/" target="_blank">Dashboard</a>',unsafe_allow_html=True)
+    st.subheader("Nodexo Dashboard")
+    st.markdown('- <span class="icon">dashboard</span> <a href="https://app.nodexo.ai/" target="_blank">Dashboard</a>',unsafe_allow_html=True)
     st.subheader("Docs")
-    st.markdown('- <span class="icon">menu_book</span> <a href="https://docs.neuralinternet.ai/" target="_blank">User Guide</a>\n- <span class="icon">article</span> <a href="https://github.com/neuralinternet/ni-compute" target="_blank">GitHub</a>',unsafe_allow_html=True)
+    st.markdown('- <span class="icon">menu_book</span> <a href="https://docs.nodexo.ai/" target="_blank">User Guide</a>\n- <span class="icon">article</span> <a href="https://github.com/nodexo/opencompute" target="_blank">GitHub</a>',unsafe_allow_html=True)
     st.subheader("Community")
-    st.markdown('- <span class="icon">public</span> <a href="https://neuralinternet.ai/" target="_blank">Website</a>\n- <span class="icon">chat</span> <a href="https://discord.com/" target="_blank">Discord</a>\n- <span class="icon">campaign</span> <a href="https://x.com/neural_internet" target="_blank">X/Twitter</a>',unsafe_allow_html=True)
+    st.markdown('- <span class="icon">public</span> <a href="https://nodexo.ai/" target="_blank">Website</a>\n- <span class="icon">chat</span> <a href="https://discord.com/" target="_blank">Discord</a>\n- <span class="icon">campaign</span> <a href="https://x.com/nodexo_ai" target="_blank">X/Twitter</a>',unsafe_allow_html=True)
     st.subheader("Monitoring")
     st.markdown('- <span class="icon">bar_chart</span> <a href="https://wandb.ai/neuralinternet/opencompute" target="_blank">WandB</a>\n- <span class="icon">insights</span> <a href="https://taostats.io/subnets/27" target="_blank">Taostats</a>',unsafe_allow_html=True)
 
@@ -856,7 +855,7 @@ def chat():
     st.title("Chat Support")
     st.markdown("---")
     st.write("Ask common questions:")
-    st.markdown('- <span class="icon">help</span> **What is NI?**\n- <span class="icon">computer</span> **How to mine?**\n- <span class="icon">warning</span> **Why no emissions?**\n- <span class="icon">check_circle</span> **Check miner health**',unsafe_allow_html=True)
+    st.markdown('- <span class="icon">help</span> **What is Nodexo?**\n- <span class="icon">computer</span> **How to mine?**\n- <span class="icon">warning</span> **Why no emissions?**\n- <span class="icon">check_circle</span> **Check miner health**',unsafe_allow_html=True)
     st.link_button("Open Chat", "https://chatgpt.com/g/...", type="secondary", icon=":material/chat:")
 
 def config_page():
