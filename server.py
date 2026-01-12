@@ -254,10 +254,11 @@ def fetch_hardware_specs(api, hotkeys: List[str]) -> Dict[int, Dict[str, Any]]:
 
     return db_specs_dict
 
-def get_allocated_hotkeys_from_sqlite(db_path: str) -> List[str]:
-    """Fetch allocated hotkeys directly from validator's SQLite database."""
+def get_allocated_hotkeys_from_sqlite(db_path: str):
+    """Fetch allocated hotkeys directly from validator's SQLite database.
+    Returns list of hotkeys on success, None on error/unavailable."""
     if not db_path or not os.path.exists(db_path):
-        return []
+        return None
 
     try:
         conn = sqlite3.connect(db_path, timeout=5.0)
@@ -265,10 +266,10 @@ def get_allocated_hotkeys_from_sqlite(db_path: str) -> List[str]:
         cursor.execute("SELECT hotkey FROM stats WHERE allocated = 1")
         hotkeys = [row[0] for row in cursor.fetchall() if row[0]]
         conn.close()
-        return hotkeys
+        return hotkeys  # Can be empty list if nothing allocated (valid)
     except Exception as e:
         print(f"[SQLite] Error fetching allocated hotkeys: {e}")
-        return []
+        return None
 
 def get_allocated_hotkeys(api, run_path: str) -> List[str]:
     """
@@ -381,13 +382,52 @@ def fetch_active_wandb_runs(api, entity: str, project: str) -> Dict[str, str]:
         print(f"An error occurred while fetching active runs from wandb ({project_path}): {e}")
     return mapping
 
+async def sync_sqlite_fast():
+    """
+    Fast background task (5s interval) for SQLite stats only.
+    Provides near-instant PoG status updates when running on same instance as validator.
+    """
+    import time
+    last_log_time = 0
+
+    while True:
+        try:
+            if not SN27_DB_PATH:
+                # Only log this warning once per minute to avoid spam
+                if time.time() - last_log_time > 60:
+                    print("[SQLite Fast Sync] SN27_DB_PATH not set - skipping fast sync")
+                    last_log_time = time.time()
+            elif not os.path.exists(SN27_DB_PATH):
+                if time.time() - last_log_time > 60:
+                    print(f"[SQLite Fast Sync] Database not found: {SN27_DB_PATH}")
+                    last_log_time = time.time()
+            else:
+                loop = asyncio.get_running_loop()
+
+                # Fast refresh of stats from SQLite
+                sqlite_stats = await loop.run_in_executor(executor, fetch_stats_from_sqlite, SN27_DB_PATH)
+                if sqlite_stats:  # Only update if we got valid data (non-empty)
+                    state.stats = sqlite_stats
+
+                # Fast refresh of allocated hotkeys from SQLite
+                # Note: Use 'is not None' to allow empty lists (0 allocated is valid)
+                sqlite_alloc = await loop.run_in_executor(executor, get_allocated_hotkeys_from_sqlite, SN27_DB_PATH)
+                if sqlite_alloc is not None:
+                    state.allocated_hotkeys_cache = sqlite_alloc
+
+        except Exception as e:
+            print(f"[SQLite Fast Sync] Error: {e}")
+
+        await asyncio.sleep(5)  # 5 second interval for fast updates
+
+
 async def sync_data_periodically():
     """
-    Background task that periodically:
-     1) Syncs the metagraph 
-     2) Fetches the validator stats 
-     3) Fetches miner specs 
-     4) Fetches allocated & penalized hotkeys
+    Slow background task (60s interval) that periodically:
+     1) Syncs the metagraph
+     2) Fetches miner specs from WandB
+     3) Fetches penalized hotkeys from WandB
+     4) Falls back to WandB for stats if SQLite unavailable
     """
     validator_run_path = "neuralinternet/opencompute/0djlnjjs"  # Example
     validator_run_path2 = "neuralinternet/opencompute/ckig4h3x"  # Example
@@ -467,13 +507,15 @@ async def sync_data_periodically():
             else:
                 state.subnet_cache = {}
 
-            new_stats = await loop.run_in_executor(
-                executor,
-                fetch_validator_stats,
-                api,
-                validator_run_path2
-            )
-            state.stats = new_stats
+            # Only fetch from WandB if SQLite not available (fast loop handles SQLite)
+            if not SN27_DB_PATH:
+                new_stats = await loop.run_in_executor(
+                    executor,
+                    fetch_validator_stats_from_wandb,
+                    api,
+                    validator_run_path2
+                )
+                state.stats = new_stats
 
             hotkeys = metagraph.hotkeys
             hardware_specs = await loop.run_in_executor(
@@ -494,13 +536,15 @@ async def sync_data_periodically():
             )
             state.hardware_specs_test_cache = hardware_specs_test
 
-            allocated = await loop.run_in_executor(
-                executor,
-                get_allocated_hotkeys,
-                api,
-                validator_run_path
-            )
-            state.allocated_hotkeys_cache = allocated
+            # Only fetch allocated from WandB if SQLite not available (fast loop handles SQLite)
+            if not SN27_DB_PATH:
+                allocated = await loop.run_in_executor(
+                    executor,
+                    get_allocated_hotkeys,
+                    api,
+                    validator_run_path
+                )
+                state.allocated_hotkeys_cache = allocated
 
             penalized = await loop.run_in_executor(
                 executor,
@@ -530,11 +574,14 @@ async def sync_data_periodically():
         except Exception as e:
             print(f"An error occurred during periodic sync: {e}")
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(60)  # 60 second interval for WandB/metagraph
 
 @app.on_event("startup")
 async def startup_event():
     wandb.login(key=api_key)
+    # Fast loop (10s) for SQLite stats - provides near-instant PoG updates
+    asyncio.create_task(sync_sqlite_fast())
+    # Slow loop (60s) for WandB/metagraph - network-dependent operations
     asyncio.create_task(sync_data_periodically())
 
 @app.get("/keys")
