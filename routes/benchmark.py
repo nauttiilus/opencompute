@@ -352,10 +352,10 @@ async def _allocate(
             print(f"[BENCH][ALLOC] Busy/declined on attempt {attempt}.")
             return {"status": False, "detail": "Allocator busy or declined."}
 
-        except bt.dendrite.exceptions.ServerDisconnectedError as e:
-            print(f"[BENCH][ALLOC][WARN] Disconnected (attempt {attempt}): {e}")
         except ConnectionRefusedError as e:
             print(f"[BENCH][ALLOC][WARN] Refused (attempt {attempt}): {e}")
+        except (ConnectionResetError, OSError) as e:
+            print(f"[BENCH][ALLOC][WARN] Connection error (attempt {attempt}): {e}")
         except Exception as e:
             print(f"[BENCH][ALLOC][ERROR] Unexpected: {e}")
             return {"status": False, "detail": f"Exception: {e}"}

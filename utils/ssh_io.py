@@ -10,6 +10,27 @@ def ssh_connect(host: str, port: int, username: str, password: str, timeout: int
     c.connect(host, port=port, username=username, password=password, timeout=timeout)
     return c
 
+
+def ssh_connect_key(host: str, port: int, username: str, private_key: paramiko.PKey, timeout: int = 25):
+    """Connect to SSH using a private key (Ed25519/RSA) instead of password."""
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    c.connect(host, port=port, username=username, pkey=private_key, timeout=timeout)
+    return c
+
+
+def generate_ssh_keypair():
+    """Generate an RSA SSH keypair. Returns (private_key_obj, public_key_string)."""
+    from paramiko import RSAKey
+
+    # Generate new RSA key (2048 bits is standard)
+    key = RSAKey.generate(2048)
+
+    # Get public key in OpenSSH format
+    public_key_str = f"ssh-rsa {key.get_base64()} hwcheck@nodexo"
+
+    return key, public_key_str
+
 def ssh_close(c) -> None:
     c.close()
 

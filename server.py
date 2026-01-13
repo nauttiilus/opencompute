@@ -436,19 +436,24 @@ async def sync_sqlite_fast():
 
 async def sync_data_periodically():
     """
-    Slow background task (60s interval) that periodically:
+    Slow background task (120s interval) that periodically:
      1) Syncs the metagraph
      2) Fetches miner specs from WandB
      3) Fetches penalized hotkeys from WandB
      4) Falls back to WandB for stats if SQLite unavailable
     """
+    print("[WandB Sync] Starting periodic sync task...")
     validator_run_path = "neuralinternet/opencompute/0djlnjjs"  # Example
     validator_run_path2 = "neuralinternet/opencompute/ckig4h3x"  # Example
 
-    api = wandb.Api()
+    api = None  # Initialize lazily inside loop
 
     while True:
         try:
+            # Create/refresh WandB API connection if needed
+            if api is None:
+                print("[WandB Sync] Creating WandB API connection (timeout=60s)...")
+                api = wandb.Api(timeout=60)
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(executor, api.flush)
 
@@ -587,17 +592,21 @@ async def sync_data_periodically():
 
             asyncio.create_task(fetch_tao_price())
 
-        except Exception as e:
-            print(f"An error occurred during periodic sync: {e}")
+            print("[WandB Sync] Sync cycle completed successfully")
 
-        await asyncio.sleep(60)  # 60 second interval for WandB/metagraph
+        except Exception as e:
+            print(f"[WandB Sync] Error during periodic sync: {e}")
+            # Reset API connection on error so it gets recreated next cycle
+            api = None
+
+        await asyncio.sleep(120)  # 120 second interval for WandB/metagraph (reduced to avoid rate limits)
 
 @app.on_event("startup")
 async def startup_event():
     wandb.login(key=api_key)
-    # Fast loop (10s) for SQLite stats - provides near-instant PoG updates
+    # Fast loop (5s) for SQLite stats - provides near-instant PoG updates
     asyncio.create_task(sync_sqlite_fast())
-    # Slow loop (60s) for WandB/metagraph - network-dependent operations
+    # Slow loop (120s) for WandB/metagraph - network-dependent operations
     asyncio.create_task(sync_data_periodically())
 
 @app.get("/keys")
@@ -701,9 +710,13 @@ async def update_config(
 from routes.rental_server import router as rental_router
 app.include_router(rental_router)
 
-# server.py (where you included rental_router)
+# Legacy benchmark (deprecated - uses old merkle proof protocol)
 from routes.benchmark import router as benchmark_router
 app.include_router(benchmark_router)
+
+# New hardware check (simplified - port checks + GPU benchmark + W&B validation)
+from routes.hardware_check import router as hardware_check_router
+app.include_router(hardware_check_router)
 
 # To run the server:
 # uvicorn server:app --reload --host 0.0.0.0 --port 8316
