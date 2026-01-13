@@ -155,9 +155,12 @@ def display_hardware_specs(specs_details, allocated_keys, penalized_keys, metagr
         det   = item.get("details", {}) or {}
         hotkey = item.get("hotkey", "unknown")
 
-        # Raw values from stats
-        raw_gpu_name = stats.get("gpu_name")
-        raw_gpu_num = stats.get("gpu_num")
+        # Raw values from stats - use gpu_specs (from SQLite) like rental _is_pog_pass does
+        gpu_specs = stats.get("gpu_specs") or {}
+        raw_gpu_name = gpu_specs.get("gpu_name") or stats.get("gpu_name")
+        raw_gpu_num = gpu_specs.get("num_gpus")
+        if raw_gpu_num is None:
+            raw_gpu_num = stats.get("gpu_num", 0)
 
         # Display values (fallback to "N/A")
         gpu_name = raw_gpu_name if raw_gpu_name else "N/A"
@@ -169,7 +172,10 @@ def display_hardware_specs(specs_details, allocated_keys, penalized_keys, metagr
         disk = (det.get("hard_disk", {}) or {}).get("free", 0) / (1024**3)
 
         status = "Res." if hotkey in allocated_keys else "Avail."
-        pog = "Pass" if raw_gpu_name and raw_gpu_num else "Fail"
+        # Match rental filtering: requires gpu_name AND num_gpus > 0 AND score > 0
+        score_val = stats.get("score")
+        pog = "Pass" if (raw_gpu_name and isinstance(raw_gpu_num, (int, float)) and raw_gpu_num > 0
+                         and score_val is not None and score_val > 0) else "Fail"
         pen = "Yes" if hotkey in penalized_keys else "No"
 
         table_data.append([
@@ -322,8 +328,12 @@ def stats():
     total = 0
     for itm in specs.values():
         sd = itm.get("stats", {}) or {}
-        name = sd.get("gpu_name", "Unknown GPU")
-        raw_cnt = sd.get("gpu_num")
+        # Use gpu_specs (from SQLite) like rental _is_pog_pass does
+        gpu_specs = sd.get("gpu_specs") or {}
+        name = gpu_specs.get("gpu_name") or sd.get("gpu_name") or "Unknown GPU"
+        raw_cnt = gpu_specs.get("num_gpus")
+        if raw_cnt is None:
+            raw_cnt = sd.get("gpu_num")
         cnt = int(raw_cnt) if isinstance(raw_cnt, (int, float)) else 0
         status = "Res." if itm.get("hotkey", "") in alloc else "Avail."
         lbl = SUPPORTED_GPUS.get(name, OTHER_GPU_LABEL)
@@ -447,18 +457,25 @@ def search():
             # Single-column layout for clarity
             col, _ = st.columns([1, 1])  # Use only the first column (50% width)
 
-            # 🚨 **Handle Missing GPU Data Case**
-            if not hardware_info or "stats" not in hardware_info or not hardware_info.get("stats", {}).get("gpu_name"):
-                col.error("⚠️ This hotkey is registered but inactive. It did not pass Proof-of-GPU (PoG) verification.")
-                return  # Stop execution to avoid further errors
-
             # ✅ **Display Hardware Information**
             col.subheader("Hardware Information")
             stats = hardware_info.get("stats", {})
             details = hardware_info.get("details", {})
 
-            gpu_name = stats.get("gpu_name", "N/A")
-            gpu_num = stats.get("gpu_num", 0)
+            # Use gpu_specs (from SQLite) like rental _is_pog_pass does
+            gpu_specs = stats.get("gpu_specs") or {}
+            gpu_name = gpu_specs.get("gpu_name") or stats.get("gpu_name") or "N/A"
+            gpu_num = gpu_specs.get("num_gpus")
+            if gpu_num is None:
+                gpu_num = stats.get("gpu_num", 0)
+
+            # 🚨 **Handle Missing GPU Data Case** - match rental filtering logic (gpu + score check)
+            score_val = stats.get("score")
+            is_pog_pass = bool(gpu_name and gpu_name != "N/A" and isinstance(gpu_num, (int, float)) and gpu_num > 0
+                               and score_val is not None and score_val > 0)
+            if not hardware_info or not is_pog_pass:
+                col.error("⚠️ This hotkey is registered but inactive. It did not pass Proof-of-GPU (PoG) verification.")
+                return  # Stop execution to avoid further errors
             cpu_specs = details.get("cpu", {})
             gpu_miner = details.get("gpu", {})
             ram_specs = details.get("ram", {})
@@ -508,7 +525,7 @@ def search():
             # ✅ **Display Scoring Metrics**
             col.subheader("Scoring Metrics")
             scoring_metrics = {
-                "PoG Status": "Pass" if gpu_name not in (None, "", "N/A") else "Fail",
+                "PoG Status": "Pass" if is_pog_pass else "Fail",
                 "Penalized": "Yes" if hotkey_input in penalized_keys else "No",
                 "Rented (Allocated)": "Yes" if hotkey_input in allocated_keys else "No",
                 "Performance Score": stats.get("score", "N/A"),
@@ -528,11 +545,11 @@ def search():
 def benchmark():
     import time  # only needed for the 4s message pause
 
-    st.title("Benchmark Tool")
+    st.title("Hardware Check Tool")
 
     st.markdown(
-        "This tool runs a controlled benchmark on a selected miner hotkey to verify GPU performance, "
-        "integrity, and configuration in a process closely aligned with the network’s validation routine."
+        "This tool runs a hardware check on a selected miner hotkey to verify port accessibility, "
+        "GPU performance, and W&B configuration."
     )
 
     # ── session flags ─────────────────────────────────────────────
@@ -573,7 +590,7 @@ def benchmark():
 
     # ── controls (Start button disabled while running) ───────────
     hotkey = st.selectbox("Target hotkey", hotkeys)
-    start = st.button("Start Benchmark", type="primary", disabled=st.session_state.bench_running)
+    start = st.button("Start Hardware Check", type="primary", disabled=st.session_state.bench_running)
 
     st.markdown("---")
 
@@ -601,7 +618,7 @@ def benchmark():
     width:18px;height:18px;border:3px solid rgba(0,0,0,0.1);
     border-top-color:#1976D2;border-radius:50%;
     animation:spin 0.8s linear infinite;"></div>
-  <div><strong>Preparing benchmark…</strong></div>
+  <div><strong>Preparing hardware check…</strong></div>
 </div>
 <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
         """, unsafe_allow_html=True)
@@ -609,7 +626,7 @@ def benchmark():
         # 1) start job  (only modification: handle 429 nicely)
         try:
             resp = requests.post(
-                f"{SERVER_URL}/benchmark/start",
+                f"{SERVER_URL}/hardware-check/start",
                 json={"hotkey": hotkey, "network": st.session_state.bench_network},
                 headers={"X-Admin-Key": ADMIN_KEY},
                 timeout=15
@@ -645,7 +662,7 @@ def benchmark():
         except Exception as e:
             spinner_ph.empty()
             st.session_state.bench_running = False
-            st.error(f"Failed to start benchmark: {e}")
+            st.error(f"Failed to start hardware check: {e}")
             st.rerun()
 
         # 2) stream logs (SSE)
@@ -656,7 +673,7 @@ def benchmark():
         end_status = None  # "done" | "error" | "cancelled"
 
         try:
-            with requests.get(f"{SERVER_URL}/benchmark/stream/{job_id}", stream=True, timeout=900) as r:
+            with requests.get(f"{SERVER_URL}/hardware-check/stream/{job_id}", stream=True, timeout=900) as r:
                 r.raise_for_status()
 
                 buffer_event, buffer_data = None, None
@@ -678,7 +695,7 @@ def benchmark():
     width:18px;height:18px;border:3px solid rgba(0,0,0,0.1);
     border-top-color:#1976D2;border-radius:50%;
     animation:spin 0.8s linear infinite;"></div>
-  <div><strong>Benchmark in progress – live logs</strong></div>
+  <div><strong>Hardware check in progress – live logs</strong></div>
 </div>
 <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
                                 """, unsafe_allow_html=True)
@@ -763,12 +780,12 @@ def benchmark():
         except Exception as e:
             spinner_ph.empty()
             st.session_state.bench_running = False
-            st.error(f"Benchmark failed ❌\n\nStream error: {e}")
+            st.error(f"Hardware check failed ❌\n\nStream error: {e}")
             st.info(
                 "How to resolve:\n"
                 "- Check server health and logs.\n"
                 "- Verify ports and firewall rules.\n"
-                "- Ensure the benchmark service is running.\n"
+                "- Ensure the hardware check service is running.\n"
                 "- Try again."
             )
             #st.rerun()
@@ -801,7 +818,7 @@ def benchmark():
 
             elif "verification failed" in lm or "pog" in lm:
                 fix += "- Check GPU clocks and thermals to avoid instability.\n" \
-                    "- Reboot the miner and re-run the benchmark.\n"
+                    "- Reboot the miner and re-run the hardware check.\n"
 
             elif "ssh" in lm or "novalidconnectionserror" in lm or "connection refused" in lm:
                 fix += "- Confirm that the SSH port (set with `ssh.port`) is open (default = 4444).\n" \
@@ -826,15 +843,15 @@ def benchmark():
             else:
                 fix += "- Check server logs for more details.\n" \
                     "- Verify miner health and configuration.\n" \
-                    "- Re-run the benchmark.\n"
+                    "- Re-run the hardware check.\n"
 
-            st.error(f"Benchmark failed ❌\n\n{msg}")
+            st.error(f"Hardware check failed ❌\n\n{msg}")
             st.info(fix)
 
         elif end_status == "cancelled":
-            st.warning("Benchmark was cancelled by user.")
+            st.warning("Hardware check was cancelled by user.")
         else:
-            st.success("Benchmark complete ✅")
+            st.success("Hardware check complete ✅")
             st.info("This miner passed all checks and is expected to validate successfully on the selected network.")
 
         # allow new runs and refresh UI (re-enable Start)
@@ -1501,7 +1518,7 @@ network_pages = [
 
 tool_pages = [
     st.Page(search,      title="Search",    icon=":material/search:"),
-    st.Page(benchmark,   title="Benchmark", icon=":material/speed:")
+    st.Page(benchmark,   title="Hardware Check", icon=":material/speed:")
 ]
 
 help_pages = [
